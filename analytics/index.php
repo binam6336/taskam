@@ -1,0 +1,2423 @@
+<?php
+ob_start();
+require_once __DIR__ . '/../config/config.php';
+require_once __DIR__ . '/../core/Auth.php';
+require_once __DIR__ . '/../database/Database.php';
+require_once __DIR__ . '/../includes/sidebar.php';
+
+if (!Auth::check()) {
+    header('Location: ../auth/login.php');
+    exit;
+}
+
+$db = Database::getInstance();
+try {
+    $db->exec("SET NAMES 'utf8mb4'");
+    $db->exec("SET time_zone = '+03:30'");
+} catch (PDOException $e) {}
+
+$userId    = (int)$_SESSION['user_id'];
+$projectId = (int)($_GET['project_id'] ?? 0);
+
+if ($projectId <= 0) {
+    header('Location: ../projects/index.php');
+    exit;
+}
+
+// ================== Persian Date Helpers ==================
+function gregorianToJalali($gy, $gm, $gd) {
+    $g_d_m = [0,31,59,90,120,151,181,212,243,273,304,334];
+    $gy2 = ($gm > 2) ? ($gy + 1) : $gy;
+    $days = 355666 + (365 * $gy) + ((int)(($gy2 + 3) / 4)) - ((int)(($gy2 + 99) / 100))
+          + ((int)(($gy2 + 399) / 400)) + $gd + $g_d_m[$gm - 1];
+    $jy = -1595 + (33 * ((int)($days / 12053)));
+    $days %= 12053;
+    $jy += 4 * ((int)($days / 1461));
+    $days %= 1461;
+    if ($days > 365) { $jy += (int)(($days - 1) / 365); $days = ($days - 1) % 365; }
+    if ($days < 186) { $jm = 1 + (int)($days / 31); $jd = 1 + ($days % 31); }
+    else { $jm = 7 + (int)(($days - 186) / 30); $jd = 1 + (($days - 186) % 30); }
+    return [$jy, $jm, $jd];
+}
+
+function formatPersianDate($datetime, $includeWeekday = true) {
+    if (empty($datetime)) return '';
+    $ts = strtotime($datetime);
+    if (!$ts) return $datetime;
+    $gy = (int)date('Y', $ts); $gm = (int)date('n', $ts); $gd = (int)date('j', $ts);
+    list($jy, $jm, $jd) = gregorianToJalali($gy, $gm, $gd);
+    $months   = ['فروردین','اردیبهشت','خرداد','تیر','مرداد','شهریور','مهر','آبان','آذر','دی','بهمن','اسفند'];
+    $weekdays = ['شنبه','یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه'];
+    $wd = (int)date('w', $ts);
+    $persianWd = ($wd + 1) % 7;
+    $time = date('H:i', $ts);
+    return ($includeWeekday ? $weekdays[$persianWd] . ' ' : '') . $jd . ' ' . $months[$jm - 1] . ' ' . $jy . ' - ' . $time;
+}
+
+function formatDuration($hours) {
+    $hours = (float)$hours;
+    if ($hours <= 0) return '—';
+    if ($hours < 1) { $m = round($hours * 60); return $m < 1 ? 'کمتر از ۱ دقیقه' : $m . ' دقیقه'; }
+    if ($hours < 24) { $h = floor($hours); $m = round(($hours - $h) * 60); return $m == 0 ? $h . ' ساعت' : $h . ' ساعت و ' . $m . ' دقیقه'; }
+    $days = floor($hours / 24); $remH = $hours - ($days * 24);
+    $h = floor($remH); $m = round(($remH - $h) * 60);
+    $r = $days . ' روز';
+    if ($h > 0) $r .= ' و ' . $h . ' ساعت';
+    if ($m > 0 && $h == 0) $r .= ' و ' . $m . ' دقیقه';
+    return $r;
+}
+
+// ================== واکشی پروژه ==================
+$stmt = $db->prepare("SELECT * FROM projects WHERE id = ? LIMIT 1");
+$stmt->execute([$projectId]);
+$project = $stmt->fetch(PDO::FETCH_ASSOC);
+if (!$project) { header('Location: ../projects/index.php'); exit; }
+
+$isCreator = ((int)$project['user_id'] === $userId);
+$hasAnalyticsPerm = false;
+if (!$isCreator) {
+    $permStmt = $db->prepare("SELECT permissions FROM project_members WHERE project_id = ? AND user_id = ? LIMIT 1");
+    $permStmt->execute([$projectId, $userId]);
+    $rawPerms = $permStmt->fetchColumn();
+    if ($rawPerms) {
+        $perms = json_decode($rawPerms, true);
+        if (is_array($perms)) $hasAnalyticsPerm = in_array('view_analytics', $perms, true);
+    }
+}
+if (!$isCreator && !$hasAnalyticsPerm) {
+    $_SESSION['project_flash'] = ['message' => 'شما دسترسی مشاهده تحلیل‌های این پروژه را ندارید.', 'type' => 'danger'];
+    header('Location: ../projects/index.php');
+    exit;
+}
+
+$displayUser = $_SESSION['user_mobile'] ?? $_SESSION['mobile'] ?? $_SESSION['username'] ?? 'کاربر';
+
+$makeAvatarUrl = function($file) {
+    if (empty($file)) return null;
+    $base = basename($file);
+    if (!preg_match('/^[A-Za-z0-9_.\-]+$/', $base)) return null;
+    if (file_exists(__DIR__ . '/../uploads/avatars/' . $base)) return '../uploads/avatars/' . rawurlencode($base);
+    return null;
+};
+$makeProjectImageUrl = function($file) {
+    if (empty($file)) return null;
+    $base = basename($file);
+    if (!preg_match('/^[A-Za-z0-9_.\-]+$/', $base)) return null;
+    if (file_exists(__DIR__ . '/../uploads/projects/' . $base)) return '../uploads/projects/' . rawurlencode($base);
+    return null;
+};
+
+// ================== آمار کلی ==================
+$stats = ['total'=>0,'completed'=>0,'pending'=>0,'high'=>0,'medium'=>0,'low'=>0,'with_due'=>0,'overdue'=>0,'on_time'=>0,'late'=>0,'unique_assignees'=>0,'unique_creators'=>0];
+try {
+    $stmt = $db->prepare("
+        SELECT COUNT(*) AS total,
+            SUM(CASE WHEN is_completed = 1 THEN 1 ELSE 0 END) AS completed,
+            SUM(CASE WHEN is_completed = 0 THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN priority = 'high' THEN 1 ELSE 0 END) AS high,
+            SUM(CASE WHEN priority = 'medium' THEN 1 ELSE 0 END) AS medium,
+            SUM(CASE WHEN priority = 'low' THEN 1 ELSE 0 END) AS low,
+            SUM(CASE WHEN due_date IS NOT NULL THEN 1 ELSE 0 END) AS with_due,
+            SUM(CASE WHEN is_completed = 0 AND due_date IS NOT NULL AND due_date < CURDATE() THEN 1 ELSE 0 END) AS overdue,
+            SUM(CASE WHEN is_completed = 1 AND due_date IS NOT NULL AND completed_at IS NOT NULL AND DATE(completed_at) <= due_date THEN 1 ELSE 0 END) AS on_time,
+            SUM(CASE WHEN is_completed = 1 AND due_date IS NOT NULL AND completed_at IS NOT NULL AND DATE(completed_at) > due_date THEN 1 ELSE 0 END) AS late,
+            COUNT(DISTINCT assignee_id) AS unique_assignees,
+            COUNT(DISTINCT user_id) AS unique_creators
+        FROM tasks WHERE project_id = ?
+    ");
+    $stmt->execute([$projectId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row) { foreach ($stats as $k => $v) $stats[$k] = (int)($row[$k] ?? 0); }
+} catch (PDOException $e) {}
+
+$completionRate = $stats['total'] > 0 ? round(($stats['completed'] / $stats['total']) * 100) : 0;
+
+// ================== تحلیل زمان ==================
+$timeStats = ['avg'=>0,'min'=>0,'max'=>0,'count'=>0];
+try {
+    $stmt = $db->prepare("
+        SELECT AVG(TIMESTAMPDIFF(MINUTE, created_at, completed_at)) / 60 AS avg_hours,
+               MIN(TIMESTAMPDIFF(MINUTE, created_at, completed_at)) / 60 AS min_hours,
+               MAX(TIMESTAMPDIFF(MINUTE, created_at, completed_at)) / 60 AS max_hours,
+               COUNT(*) AS done_count
+        FROM tasks WHERE project_id = ? AND is_completed = 1 AND completed_at IS NOT NULL AND completed_at > created_at
+    ");
+    $stmt->execute([$projectId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row) {
+        $timeStats['avg'] = round((float)($row['avg_hours'] ?? 0), 4);
+        $timeStats['min'] = round((float)($row['min_hours'] ?? 0), 4);
+        $timeStats['max'] = round((float)($row['max_hours'] ?? 0), 4);
+        $timeStats['count'] = (int)($row['done_count'] ?? 0);
+    }
+} catch (PDOException $e) {}
+
+// ================== یادداشت‌ها و پیوست‌ها ==================
+$notesCount = 0; $notesAuthors = 0;
+try {
+    $stmt = $db->prepare("SELECT COUNT(*) AS cnt, COUNT(DISTINCT tn.user_id) AS authors FROM task_notes tn INNER JOIN tasks t ON t.id = tn.task_id WHERE t.project_id = ?");
+    $stmt->execute([$projectId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row) { $notesCount = (int)$row['cnt']; $notesAuthors = (int)$row['authors']; }
+} catch (PDOException $e) {}
+
+$taskAttachCount = 0;
+try { $stmt = $db->prepare("SELECT COUNT(*) FROM task_attachments ta INNER JOIN tasks t ON t.id = ta.task_id WHERE t.project_id = ?"); $stmt->execute([$projectId]); $taskAttachCount = (int)$stmt->fetchColumn(); } catch (PDOException $e) {}
+$noteAttachCount = 0;
+try { $stmt = $db->prepare("SELECT COUNT(*) FROM note_attachments na INNER JOIN task_notes tn ON tn.id = na.note_id INNER JOIN tasks t ON t.id = tn.task_id WHERE t.project_id = ?"); $stmt->execute([$projectId]); $noteAttachCount = (int)$stmt->fetchColumn(); } catch (PDOException $e) {}
+
+$totalAttachments = $taskAttachCount + $noteAttachCount;
+$avgNotesPerTask = $stats['total'] > 0 ? round($notesCount / $stats['total'], 2) : 0;
+
+// ================== روند ۷ روز ==================
+$trendDays = []; $trendCreated = []; $trendCompleted = []; $trendAvgHours = [];
+for ($i = 6; $i >= 0; $i--) {
+    $date = date('Y-m-d', strtotime("-$i days"));
+    $trendDays[] = date('m/d', strtotime("-$i days"));
+    try {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM tasks WHERE project_id = ? AND DATE(created_at) = ?");
+        $stmt->execute([$projectId, $date]);
+        $trendCreated[] = (int)$stmt->fetchColumn();
+        $stmt = $db->prepare("SELECT COUNT(*) FROM tasks WHERE project_id = ? AND DATE(completed_at) = ?");
+        $stmt->execute([$projectId, $date]);
+        $trendCompleted[] = (int)$stmt->fetchColumn();
+        $stmt = $db->prepare("SELECT AVG(TIMESTAMPDIFF(MINUTE, created_at, completed_at)) / 60 AS avg_hours FROM tasks WHERE project_id = ? AND is_completed = 1 AND completed_at IS NOT NULL AND completed_at > created_at AND DATE(completed_at) = ?");
+        $stmt->execute([$projectId, $date]);
+        $avgH = $stmt->fetchColumn();
+        $trendAvgHours[] = $avgH !== false && $avgH !== null ? round((float)$avgH, 2) : null;
+    } catch (PDOException $e) { $trendCreated[] = 0; $trendCompleted[] = 0; $trendAvgHours[] = null; }
+}
+
+// ================== روند ۶ ماه ==================
+$monthLabels = []; $monthCreated = []; $monthCompleted = [];
+for ($i = 5; $i >= 0; $i--) {
+    $start = date('Y-m-01', strtotime("-$i months"));
+    $end   = date('Y-m-t', strtotime("-$i months"));
+    $monthLabels[] = date('m/Y', strtotime("-$i months"));
+    try {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM tasks WHERE project_id = ? AND DATE(created_at) BETWEEN ? AND ?");
+        $stmt->execute([$projectId, $start, $end]);
+        $monthCreated[] = (int)$stmt->fetchColumn();
+        $stmt = $db->prepare("SELECT COUNT(*) FROM tasks WHERE project_id = ? AND DATE(completed_at) BETWEEN ? AND ?");
+        $stmt->execute([$projectId, $start, $end]);
+        $monthCompleted[] = (int)$stmt->fetchColumn();
+    } catch (PDOException $e) { $monthCreated[] = 0; $monthCompleted[] = 0; }
+}
+
+// ================== آمار اعضا ==================
+$membersStats = [];
+try {
+    $memberStmt = $db->prepare("SELECT u.id, u.first_name, u.last_name, u.mobile, u.avatar FROM project_members pm INNER JOIN users u ON u.id = pm.user_id WHERE pm.project_id = ? ORDER BY u.first_name ASC, u.last_name ASC");
+    $memberStmt->execute([$projectId]);
+    $members = $memberStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $tasksStatsStmt = $db->prepare("
+        SELECT assignee_id AS uid, COUNT(*) AS total,
+            SUM(CASE WHEN is_completed = 1 THEN 1 ELSE 0 END) AS completed,
+            SUM(CASE WHEN is_completed = 0 THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN is_completed = 1 AND completed_at IS NOT NULL AND completed_at > created_at THEN TIMESTAMPDIFF(MINUTE, created_at, completed_at) / 60 ELSE NULL END) AS total_hours,
+            SUM(CASE WHEN is_completed = 1 AND completed_at IS NOT NULL AND completed_at > created_at THEN 1 ELSE 0 END) AS done_with_time
+        FROM tasks WHERE project_id = ? GROUP BY assignee_id
+    ");
+    $tasksStatsStmt->execute([$projectId]);
+    $taskStatsRows = $tasksStatsStmt->fetchAll(PDO::FETCH_ASSOC);
+    $taskStatsByUid = [];
+    foreach ($taskStatsRows as $r) $taskStatsByUid[(int)$r['uid']] = $r;
+
+    $notesByUser = [];
+    $nStmt = $db->prepare("SELECT tn.user_id AS uid, COUNT(*) AS cnt FROM task_notes tn INNER JOIN tasks t ON t.id = tn.task_id WHERE t.project_id = ? GROUP BY tn.user_id");
+    $nStmt->execute([$projectId]);
+    foreach ($nStmt->fetchAll(PDO::FETCH_ASSOC) as $r) $notesByUser[(int)$r['uid']] = (int)$r['cnt'];
+
+    $filesByUser = [];
+    $fStmt = $db->prepare("SELECT ta.user_id AS uid, COUNT(*) AS cnt FROM task_attachments ta INNER JOIN tasks t ON t.id = ta.task_id WHERE t.project_id = ? GROUP BY ta.user_id");
+    $fStmt->execute([$projectId]);
+    foreach ($fStmt->fetchAll(PDO::FETCH_ASSOC) as $r) $filesByUser[(int)$r['uid']] = (int)$r['cnt'];
+
+    foreach ($members as $m) {
+        $uid = (int)$m['id'];
+        $tRow = $taskStatsByUid[$uid] ?? null;
+        $total = $tRow ? (int)$tRow['total'] : 0;
+        $completed = $tRow ? (int)$tRow['completed'] : 0;
+        $pending = $tRow ? (int)$tRow['pending'] : 0;
+        $doneWithTime = $tRow ? (int)$tRow['done_with_time'] : 0;
+        $totalHours = $tRow ? (float)$tRow['total_hours'] : 0;
+        $avgHours = $doneWithTime > 0 ? round($totalHours / $doneWithTime, 4) : 0;
+        $rate = $total > 0 ? round(($completed / $total) * 100) : 0;
+        $fullName = trim(($m['first_name'] ?? '') . ' ' . ($m['last_name'] ?? ''));
+        if ($fullName === '') $fullName = $m['mobile'];
+        $membersStats[] = [
+            'id' => $uid, 'name' => $fullName, 'mobile' => $m['mobile'],
+            'avatar_url' => $makeAvatarUrl($m['avatar'] ?? null),
+            'initial' => mb_substr(trim($m['first_name'] ?: $m['mobile']), 0, 1, 'UTF-8'),
+            'is_creator' => ((int)$project['user_id'] === $uid),
+            'total' => $total, 'completed' => $completed, 'pending' => $pending,
+            'rate' => $rate, 'avg_hours' => $avgHours,
+            'notes' => $notesByUser[$uid] ?? 0, 'files' => $filesByUser[$uid] ?? 0,
+        ];
+    }
+    usort($membersStats, function($a, $b) {
+        if ($b['completed'] === $a['completed']) return $b['total'] <=> $a['total'];
+        return $b['completed'] <=> $a['completed'];
+    });
+} catch (PDOException $e) {}
+
+// ================== روند سرعت کاربران ==================
+$speedTrend = ['users' => []];
+$speedUserColors = ['#2563eb', '#10b981', '#7c3aed', '#f59e0b', '#ec4899', '#14b8a6', '#ef4444', '#6366f1', '#0891b2', '#d946ef'];
+try {
+    $allSpeedUsers = $membersStats;
+    $allSpeedIds = array_map(fn($u) => (int)$u['id'], $allSpeedUsers);
+    if (!empty($allSpeedIds)) {
+        $placeholders = implode(',', array_fill(0, count($allSpeedIds), '?'));
+        $stmt = $db->prepare("
+            SELECT assignee_id, DATE(completed_at) AS day_key, AVG(TIMESTAMPDIFF(MINUTE, created_at, completed_at)) / 60 AS avg_hours
+            FROM tasks WHERE project_id = ? AND assignee_id IN ($placeholders) AND is_completed = 1 AND completed_at IS NOT NULL AND completed_at > created_at AND completed_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+            GROUP BY assignee_id, day_key
+        ");
+        $stmt->execute(array_merge([$projectId], $allSpeedIds));
+        $speedRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $dayKeys = [];
+        for ($i = 6; $i >= 0; $i--) $dayKeys[] = date('Y-m-d', strtotime("-$i days"));
+
+        $speedMap = [];
+        foreach ($speedRows as $r) $speedMap[(int)$r['assignee_id']][$r['day_key']] = round((float)$r['avg_hours'], 2);
+
+        $colorIdx = 0;
+        foreach ($allSpeedUsers as $u) {
+            $data = []; $hasAnyData = false;
+            foreach ($dayKeys as $dk) {
+                if (isset($speedMap[(int)$u['id']][$dk])) { $data[] = $speedMap[(int)$u['id']][$dk]; $hasAnyData = true; }
+                else $data[] = null;
+            }
+            if ($hasAnyData) {
+                $speedTrend['users'][] = [
+                    'name' => $u['name'], 'color' => $speedUserColors[$colorIdx % count($speedUserColors)],
+                    'data' => $data, 'is_creator' => $u['is_creator'],
+                    'avatar_url' => $u['avatar_url'], 'initial' => $u['initial'],
+                ];
+                $colorIdx++;
+            }
+        }
+    }
+} catch (PDOException $e) {}
+
+// ================== یادداشت‌نویس‌ها ==================
+$topNoteWriters = [];
+try {
+    $stmt = $db->prepare("SELECT u.id, u.first_name, u.last_name, u.mobile, u.avatar, COUNT(tn.id) AS notes_count FROM task_notes tn INNER JOIN tasks t ON t.id = tn.task_id INNER JOIN users u ON u.id = tn.user_id WHERE t.project_id = ? GROUP BY u.id ORDER BY notes_count DESC LIMIT 5");
+    $stmt->execute([$projectId]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $r) {
+        $fullName = trim(($r['first_name'] ?? '') . ' ' . ($r['last_name'] ?? ''));
+        if ($fullName === '') $fullName = $r['mobile'];
+        $topNoteWriters[] = ['name' => $fullName, 'mobile' => $r['mobile'], 'avatar_url' => $makeAvatarUrl($r['avatar'] ?? null), 'initial' => mb_substr(trim($r['first_name'] ?: $r['mobile']), 0, 1, 'UTF-8'), 'count' => (int)$r['notes_count']];
+    }
+} catch (PDOException $e) {}
+
+// ================== آخرین فعالیت‌ها ==================
+$recentActivities = [];
+try {
+    $stmt = $db->prepare("
+        (SELECT 'task' AS type, t.id AS ref_id, t.title AS label, t.created_at AS at_time, u.first_name, u.last_name, u.mobile AS u_mobile, u.avatar AS u_avatar FROM tasks t LEFT JOIN users u ON u.id = t.user_id WHERE t.project_id = ? ORDER BY t.created_at DESC LIMIT 8)
+        UNION ALL
+        (SELECT 'note' AS type, tn.task_id AS ref_id, t.title AS label, tn.created_at AS at_time, u.first_name, u.last_name, u.mobile AS u_mobile, u.avatar AS u_avatar FROM task_notes tn INNER JOIN tasks t ON t.id = tn.task_id LEFT JOIN users u ON u.id = tn.user_id WHERE t.project_id = ? ORDER BY tn.created_at DESC LIMIT 8)
+        ORDER BY at_time DESC LIMIT 10
+    ");
+    $stmt->execute([$projectId, $projectId]);
+    $recentActivities = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {}
+
+// ================== موضوعات ==================
+$topSubjects = [];
+try {
+    $stmt = $db->prepare("SELECT s.title, COUNT(t.id) AS cnt FROM subjects s INNER JOIN tasks t ON t.subject_id = s.id WHERE t.project_id = ? GROUP BY s.id ORDER BY cnt DESC");
+    $stmt->execute([$projectId]);
+    $topSubjects = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {}
+
+$subjectLabels = array_column($topSubjects, 'title');
+$subjectCounts = array_map('intval', array_column($topSubjects, 'cnt'));
+
+$dashboardData = [
+    'total' => $stats['total'], 'completed' => $stats['completed'], 'pending' => $stats['pending'],
+    'high' => $stats['high'], 'medium' => $stats['medium'], 'low' => $stats['low'],
+    'trendDays' => $trendDays, 'trendCreated' => $trendCreated, 'trendCompleted' => $trendCompleted,
+    'trendAvgHours' => $trendAvgHours,
+    'monthLabels' => $monthLabels, 'monthCreated' => $monthCreated, 'monthCompleted' => $monthCompleted,
+    'subjectLabels' => $subjectLabels, 'subjectCounts' => $subjectCounts,
+    'onTime' => $stats['on_time'], 'late' => $stats['late'], 'overdue' => $stats['overdue'],
+    'speedTrend' => $speedTrend,
+];
+
+$dashboardDataJson = json_encode($dashboardData, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$projectImageUrl = $makeProjectImageUrl($project['profile_image'] ?? null);
+$projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
+?>
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+    <title>تحلیل‌های پروژه | <?= htmlspecialchars($project['title']) ?></title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="icon" href="https://img.icons8.com/color/48/dashboard-layout.png" type="image/png">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+    :root {
+        --primary: #1e293b;
+        --accent: #2563eb;
+        --violet: #7c3aed;
+        --bg: #f8fafc;
+        --card: #ffffff;
+        --text: #334155;
+        --border: #e2e8f0;
+        --success: #10b981;
+        --warning: #f59e0b;
+        --danger: #ef4444;
+        --pink: #ec4899;
+        --teal: #14b8a6;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { max-width: 100%; overflow-x: hidden; }
+    body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: Tahoma, sans-serif;
+        margin: 0;
+        display: flex;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    .sidebar {
+        background: linear-gradient(180deg, #4c8bf5 0%, #2f6bdc 100%) !important;
+        color: #fff !important;
+        box-shadow: -6px 0 28px rgba(76, 139, 245, 0.18);
+        overflow: visible !important;
+        scrollbar-width: none !important;
+        -ms-overflow-style: none !important;
+    }
+    .sidebar::-webkit-scrollbar { display: none !important; }
+    body > .sidebar, body .sidebar {
+        height: 100vh !important; height: 100dvh !important;
+        max-height: 100vh !important; max-height: 100dvh !important;
+        align-self: flex-start !important;
+    }
+    .sidebar .menu-item { color: rgba(255,255,255,0.85) !important; }
+    .sidebar .menu-item:hover, .sidebar .menu-item.active { background: rgba(255,255,255,0.18) !important; color: #fff !important; }
+    .sidebar-brand { border-bottom: 1px solid rgba(255,255,255,0.15) !important; }
+    .menu-parent { color: rgba(255,255,255,0.82) !important; }
+    .menu-parent:hover, .menu-parent.is-open, .menu-parent.is-current { background: rgba(255,255,255,0.14) !important; color: #fff !important; }
+    .submenu-inner a { color: rgba(255,255,255,0.78) !important; }
+    .submenu-inner a:hover, .submenu-inner a.active { color: #fff !important; background: rgba(255,255,255,0.14) !important; }
+
+    .sidebar-overlay {
+        display: none; position: fixed; inset: 0;
+        background: rgba(20, 30, 60, 0.5);
+        z-index: 998; opacity: 0; transition: opacity 0.25s ease;
+    }
+    .sidebar-overlay.active { display: block; opacity: 1; }
+
+    .main-wrapper { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+    .topbar {
+        background: var(--card);
+        padding: 15px clamp(16px, 2vw, 30px);
+        border-bottom: 1px solid var(--border);
+        display: flex; justify-content: space-between; align-items: center;
+        gap: 12px; flex-shrink: 0;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+    .topbar-back {
+        width: 40px; height: 40px; border-radius: 12px;
+        background: #eff6ff; color: var(--accent);
+        border: 1px solid #dbeafe;
+        display: inline-flex; align-items: center; justify-content: center;
+        text-decoration: none; flex-shrink: 0; font-size: 0.95rem;
+        transition: all 0.15s ease;
+    }
+    .topbar-back:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .topbar-title { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .topbar-title h1 { margin: 0; font-size: clamp(0.95rem, 1.3vw, 1.15rem); color: var(--primary); font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .topbar-title span { font-size: 0.72rem; color: #64748b; display: flex; align-items: center; gap: 6px; }
+    .topbar-title span .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15); }
+    .topbar-user { font-size: 0.85rem; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; flex-shrink: 0; color: var(--text); }
+    .topbar-project-thumb {
+        width: 42px; height: 42px; border-radius: 12px;
+        background: linear-gradient(135deg, #6366f1, #4f46e5);
+        color: #fff;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-weight: bold; font-size: 1rem; flex-shrink: 0; overflow: hidden;
+    }
+    .topbar-project-thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+    .content-area {
+        flex: 1; padding: clamp(12px, 2vw, 25px);
+        overflow-y: auto; -webkit-overflow-scrolling: touch;
+    }
+
+    /* ============ PAGE HEADER (مثل Home + Layout/Customization) ============ */
+    .page-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 18px;
+        flex-wrap: wrap;
+    }
+    .page-header h1 {
+        margin: 0;
+        font-size: clamp(1.2rem, 1.8vw, 1.6rem);
+        color: var(--primary);
+        font-weight: bold;
+        letter-spacing: -0.5px;
+    }
+    .page-header__actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+    .btn-outline {
+        background: #ffffff;
+        border: 1.5px solid var(--border);
+        color: var(--text);
+        padding: 9px 16px;
+        border-radius: 12px;
+        font-family: inherit;
+        font-size: 0.82rem;
+        font-weight: bold;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        transition: all 0.15s ease;
+    }
+    .btn-outline:hover { border-color: #cbd5e1; background: #f8fafc; }
+    .btn-outline i { color: #64748b; font-size: 0.8rem; }
+
+    /* ============ HERO ROW (چیدمان اصلی تصویر) ============ */
+    .hero-row {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 18px;
+        margin-bottom: 20px;
+    }
+    .hero-main, .hero-side {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 22px;
+        transition: border-color 0.15s ease;
+    }
+    .hero-main { display: flex; flex-direction: column; }
+    .hero-main__toolbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding-bottom: 16px;
+        margin-bottom: 16px;
+        border-bottom: 1px solid var(--border);
+        flex-wrap: wrap;
+    }
+    .hero-main__badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        background: linear-gradient(135deg, #dbeafe, #eff6ff);
+        color: #1e40af;
+        border: 1px solid #bfdbfe;
+        padding: 6px 12px;
+        border-radius: 10px;
+        font-size: 0.75rem;
+        font-weight: bold;
+    }
+    .hero-main__badge i { font-size: 0.75rem; color: #2563eb; }
+    .hero-main__icons {
+        display: flex;
+        gap: 4px;
+        margin-right: auto;
+    }
+    .hero-main__icons button {
+        background: #f8fafc;
+        border: 1px solid var(--border);
+        color: #64748b;
+        width: 30px; height: 30px;
+        border-radius: 9px;
+        cursor: pointer;
+        font-family: inherit;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s ease;
+        font-size: 0.75rem;
+    }
+    .hero-main__icons button:hover { background: #eff6ff; color: var(--accent); border-color: #dbeafe; }
+
+    .hero-main__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+    }
+    .hero-main__title {
+        font-size: 0.95rem;
+        font-weight: bold;
+        color: var(--primary);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .hero-main__title .ic {
+        width: 32px; height: 32px; border-radius: 10px;
+        background: #dbeafe; color: #2563eb;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 0.8rem;
+    }
+    .hero-main__desc {
+        font-size: 0.72rem;
+        color: #94a3b8;
+        line-height: 1.7;
+    }
+
+    .hero-main__legend {
+        display: flex; gap: 14px; align-items: center;
+        font-size: 0.75rem; color: #64748b;
+        flex-wrap: wrap;
+    }
+    .hero-main__legend .dot {
+        width: 10px; height: 10px;
+        border-radius: 3px;
+        margin-left: 6px;
+        display: inline-block;
+        vertical-align: middle;
+    }
+
+    .hero-main__chart {
+        position: relative;
+        height: 300px;
+        flex: 1;
+        min-height: 240px;
+    }
+
+    /* KPI بزرگ سمت راست */
+    .hero-side {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+    }
+    .hero-side__top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+    }
+    .hero-side__label {
+        font-size: 0.75rem;
+        color: #64748b;
+        font-weight: bold;
+        letter-spacing: 0.3px;
+    }
+    .hero-side__select {
+        background: #f8fafc;
+        border: 1.5px solid var(--border);
+        border-radius: 10px;
+        padding: 6px 12px;
+        font-family: inherit;
+        font-size: 0.72rem;
+        font-weight: bold;
+        color: var(--text);
+        cursor: pointer;
+    }
+
+    .hero-side__value {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: var(--primary);
+        line-height: 1;
+        letter-spacing: -1.5px;
+        margin: 4px 0 6px;
+    }
+    .hero-side__value small {
+        font-size: 0.72rem;
+        font-weight: normal;
+        color: #94a3b8;
+        letter-spacing: 0;
+        margin-right: 6px;
+    }
+    .hero-side__sub {
+        font-size: 0.75rem;
+        color: #64748b;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .hero-side__sub .pill {
+        background: #d1fae5;
+        color: #065f46;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-weight: bold;
+        font-size: 0.68rem;
+    }
+    .hero-side__sub .pill.down { background: #fee2e2; color: #991b1b; }
+
+    .hero-side__mini-chart {
+        position: relative;
+        height: 130px;
+        margin-top: 6px;
+    }
+
+    /* ============ TOOLBAR ROW (مثل Income Statement Report) ============ */
+    .toolbar-row {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 14px 20px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+    }
+    .toolbar-row__title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 0.9rem;
+        font-weight: bold;
+        color: var(--primary);
+        flex-shrink: 0;
+    }
+    .toolbar-row__title i:first-child {
+        color: #94a3b8;
+        font-size: 0.8rem;
+    }
+    .toolbar-row__title .edit-ic {
+        color: #cbd5e1;
+        font-size: 0.72rem;
+    }
+    .toolbar-row__spacer { flex: 1; }
+    .toolbar-row__group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        background: #f8fafc;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        font-size: 0.75rem;
+        color: #64748b;
+        font-weight: bold;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .toolbar-row__group:hover { background: #eff6ff; border-color: #dbeafe; color: var(--accent); }
+    .toolbar-row__group i { font-size: 0.7rem; }
+    .toolbar-row__icon-btn {
+        width: 34px; height: 34px;
+        border-radius: 10px;
+        background: #f8fafc;
+        border: 1px solid var(--border);
+        color: #64748b;
+        cursor: pointer;
+        font-family: inherit;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s ease;
+        font-size: 0.8rem;
+    }
+    .toolbar-row__icon-btn:hover { background: #eff6ff; color: var(--accent); border-color: #dbeafe; }
+    .toolbar-row__save {
+        background: linear-gradient(135deg, #2563eb, #1d4ed8);
+        border: none;
+        color: #fff;
+        padding: 9px 18px;
+        border-radius: 10px;
+        font-family: inherit;
+        font-size: 0.8rem;
+        font-weight: bold;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        transition: all 0.15s ease;
+        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+    }
+    .toolbar-row__save:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37, 99, 235, 0.35); }
+
+    /* ============ SPLIT ROW (جدول + خلاصه) ============ */
+    .split-row {
+        display: grid;
+        grid-template-columns: 1.3fr 1fr;
+        gap: 18px;
+        margin-bottom: 20px;
+    }
+
+    /* ============ SUMMARY CARD ============ */
+    .summary-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 22px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+    }
+    .summary-card__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--border);
+    }
+    .summary-card__title {
+        font-size: 0.92rem;
+        font-weight: bold;
+        color: var(--primary);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .summary-card__title i { color: var(--accent); }
+
+    .summary-insight {
+        padding: 14px 16px;
+        background: #f8fafc;
+        border-radius: 12px;
+        border-right: 3px solid var(--accent);
+        font-size: 0.82rem;
+        color: var(--text);
+        line-height: 1.9;
+    }
+    .summary-insight strong { color: var(--primary); }
+    .summary-insight .highlight-green { color: #059669; font-weight: bold; }
+    .summary-insight .highlight-red { color: #dc2626; font-weight: bold; }
+
+    .summary-mini-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+    }
+    .mini-metric {
+        background: #f8fafc;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px;
+        text-align: center;
+    }
+    .mini-metric__label {
+        font-size: 0.68rem;
+        color: #94a3b8;
+        margin-bottom: 6px;
+        font-weight: bold;
+    }
+    .mini-metric__value {
+        font-size: 1.2rem;
+        font-weight: bold;
+        color: var(--primary);
+        line-height: 1;
+    }
+    .mini-metric__value.green { color: #059669; }
+    .mini-metric__value.red { color: #dc2626; }
+    .mini-metric__value.orange { color: #ea580c; }
+
+    .summary-bars {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin-top: 4px;
+    }
+    .summary-bar-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 0.75rem;
+    }
+    .summary-bar-row .label {
+        min-width: 70px;
+        color: #64748b;
+        font-weight: bold;
+    }
+    .summary-bar-row .bar-track {
+        flex: 1;
+        height: 8px;
+        background: #f1f5f9;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .summary-bar-row .bar-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.6s ease;
+    }
+    .summary-bar-row .value {
+        min-width: 40px;
+        text-align: left;
+        font-weight: bold;
+        color: var(--primary);
+        font-size: 0.75rem;
+    }
+
+    /* ============ CHART CARDS (بقیه) ============ */
+    .chart-card {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 20px; padding: 22px;
+        transition: border-color 0.15s ease; margin-bottom: 20px;
+    }
+    .chart-card:hover { border-color: #cbd5e1; }
+    .chart-card__head {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        gap: 12px; margin-bottom: 18px; flex-wrap: wrap;
+    }
+    .chart-card__title-wrap { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+    .chart-card__title { display: flex; align-items: center; gap: 10px; font-size: 0.95rem; font-weight: bold; color: var(--primary); }
+    .chart-card__title-icon {
+        width: 36px; height: 36px; border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 0.85rem; flex-shrink: 0;
+    }
+    .chart-card__title-icon.blue   { background: #dbeafe; color: #2563eb; }
+    .chart-card__title-icon.violet { background: #ede9fe; color: #7c3aed; }
+    .chart-card__title-icon.teal   { background: #ccfbf1; color: #0d9488; }
+    .chart-card__title-icon.orange { background: #ffedd5; color: #ea580c; }
+    .chart-card__title-icon.green  { background: #d1fae5; color: #059669; }
+    .chart-card__title-icon.pink   { background: #fce7f3; color: #db2777; }
+    .chart-card__desc { font-size: 0.72rem; color: #94a3b8; line-height: 1.7; padding-right: 46px; font-weight: normal; }
+    .chart-card__desc i { color: #cbd5e1; margin-left: 4px; font-size: 0.65rem; }
+    .chart-card__legend { display: flex; gap: 14px; align-items: center; font-size: 0.72rem; color: #64748b; flex-wrap: wrap; flex-shrink: 0; }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .legend-dot.blue   { background: #2563eb; }
+    .legend-dot.green  { background: #059669; }
+    .legend-dot.orange { background: #ea580c; }
+    .chart-wrap { position: relative; height: 260px; }
+
+    /* ============ MULTI-SELECT ============ */
+    .multi-select { position: relative; display: inline-block; min-width: 220px; flex-shrink: 0; }
+    .multi-select__trigger {
+        display: flex; align-items: center; gap: 8px;
+        padding: 9px 14px;
+        background: #ffffff; border: 1.5px solid var(--border);
+        border-radius: 12px; cursor: pointer;
+        font-family: inherit; font-size: 0.82rem; font-weight: bold;
+        color: var(--primary); width: 100%;
+        transition: all 0.15s ease; text-align: right;
+    }
+    .multi-select__trigger:hover { border-color: #cbd5e1; background: #f8fafc; }
+    .multi-select.open .multi-select__trigger { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.10); background: #fff; }
+    .multi-select__trigger > i:first-child { color: var(--accent); font-size: 0.85rem; }
+    .multi-select__label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+    .multi-select__count { background: #dbeafe; color: #1e40af; font-size: 0.68rem; padding: 2px 8px; border-radius: 6px; font-weight: bold; flex-shrink: 0; }
+    .multi-select__chevron { color: #94a3b8; font-size: 0.75rem; transition: transform 0.2s ease; flex-shrink: 0; }
+    .multi-select.open .multi-select__chevron { transform: rotate(180deg); color: var(--accent); }
+    .multi-select__dropdown {
+        position: absolute; top: calc(100% + 6px); right: 0;
+        min-width: 280px; max-width: 340px;
+        background: #ffffff; border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: 0 12px 32px -8px rgba(15, 23, 42, 0.18);
+        z-index: 100; opacity: 0; visibility: hidden;
+        transform: translateY(-6px);
+        transition: all 0.15s ease; overflow: hidden;
+    }
+    .multi-select.open .multi-select__dropdown { opacity: 1; visibility: visible; transform: translateY(0); }
+    .multi-select__header {
+        padding: 10px 14px;
+        background: #f8fafc;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.7rem; color: #64748b; font-weight: bold;
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    }
+    .multi-select__header i { color: #94a3b8; }
+    .multi-select__list { max-height: 280px; overflow-y: auto; padding: 6px; }
+    .multi-select__list::-webkit-scrollbar { width: 6px; }
+    .multi-select__list::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .multi-select__item {
+        display: flex; align-items: center; gap: 10px;
+        padding: 9px 10px; border-radius: 10px; cursor: pointer;
+        transition: background 0.12s ease; user-select: none;
+    }
+    .multi-select__item:hover { background: #f1f5f9; }
+    .multi-select__item.selected { background: #eff6ff; }
+    .multi-select__item.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+    .multi-select__check {
+        width: 18px; height: 18px; border-radius: 5px;
+        border: 2px solid #cbd5e1; background: #fff;
+        display: flex; align-items: center; justify-content: center;
+        color: #fff; font-size: 0.55rem; flex-shrink: 0;
+        transition: all 0.12s ease;
+    }
+    .multi-select__item.selected .multi-select__check { background: var(--accent); border-color: var(--accent); }
+    .multi-select__avatar {
+        width: 26px; height: 26px; border-radius: 8px;
+        background: #f1f5f9;
+        display: flex; align-items: center; justify-content: center;
+        font-weight: bold; font-size: 0.72rem; color: var(--accent);
+        flex-shrink: 0; overflow: hidden;
+    }
+    .multi-select__avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .multi-select__color-dot { width: 12px; height: 12px; border-radius: 4px; flex-shrink: 0; }
+    .multi-select__name {
+        flex: 1; font-size: 0.82rem; font-weight: 600; color: var(--primary);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .multi-select__name .crown { color: #fbbf24; font-size: 0.65rem; margin-right: 3px; }
+    .multi-select__count-badge { font-size: 0.65rem; color: #94a3b8; background: #f1f5f9; padding: 2px 7px; border-radius: 5px; font-weight: bold; flex-shrink: 0; }
+
+    /* ============ SPEED LEGEND ============ */
+    .speed-legend {
+        display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;
+        margin-top: 16px; padding-top: 16px; border-top: 1px solid #f1f5f9;
+    }
+    .speed-chip {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 14px 8px 8px;
+        background: #f8fafc; border: 1.5px solid var(--border);
+        border-radius: 30px; cursor: pointer;
+        transition: all 0.15s ease; font-size: 0.78rem;
+        font-weight: bold; color: #475569;
+        font-family: inherit; user-select: none;
+    }
+    .speed-chip:hover { background: #fff; border-color: #cbd5e1; transform: translateY(-2px); box-shadow: 0 6px 16px -6px rgba(15, 23, 42, 0.12); }
+    .speed-chip:active { transform: translateY(0); }
+    .speed-chip__avatar {
+        width: 28px; height: 28px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-weight: bold; font-size: 0.75rem; color: #fff;
+        flex-shrink: 0; overflow: hidden;
+    }
+    .speed-chip__avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .speed-chip__info { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; }
+    .speed-chip__name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+    .speed-chip__hint { font-size: 0.62rem; color: #94a3b8; font-weight: normal; }
+    .speed-chip__arrow { color: #cbd5e1; font-size: 0.65rem; margin-right: 2px; transition: all 0.15s ease; }
+    .speed-chip:hover .speed-chip__arrow { color: var(--accent); transform: translateX(-2px); }
+
+    /* ============ MODAL ============ */
+    .modal-overlay {
+        position: fixed; inset: 0;
+        background: rgba(15, 23, 42, 0.65);
+        display: flex; align-items: center; justify-content: center;
+        padding: 15px; z-index: 2000;
+        opacity: 0; visibility: hidden; pointer-events: none;
+        transition: opacity 0.2s ease, visibility 0.2s;
+        overflow-y: auto; -webkit-overflow-scrolling: touch;
+    }
+    .modal-overlay.active { opacity: 1; visibility: visible; pointer-events: auto; }
+    .modal-box {
+        background: #ffffff; width: 100%; max-width: 720px;
+        border-radius: 22px; padding: 24px;
+        max-height: 92vh; max-height: 92dvh;
+        overflow-y: auto;
+        transform: scale(0.95);
+        transition: transform 0.2s ease;
+        box-shadow: 0 24px 60px -12px rgba(15, 23, 42, 0.35);
+    }
+    .modal-overlay.active .modal-box { transform: scale(1); }
+    .modal-header {
+        display: flex; justify-content: space-between; align-items: center;
+        margin-bottom: 18px; padding-bottom: 14px;
+        border-bottom: 1px solid var(--border); gap: 10px;
+    }
+    .modal-header h3 {
+        margin: 0; font-size: 1rem; color: var(--primary);
+        display: flex; align-items: center; gap: 10px; font-weight: bold;
+    }
+    .modal-header h3 .modal-avatar {
+        width: 36px; height: 36px; border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-weight: bold; font-size: 0.85rem; color: #fff;
+        flex-shrink: 0; overflow: hidden;
+    }
+    .modal-header h3 .modal-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .modal-close {
+        background: #f1f5f9; border: none;
+        width: 34px; height: 34px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.2rem; cursor: pointer;
+        color: #64748b; font-weight: bold;
+        transition: background 0.15s ease;
+        flex-shrink: 0; font-family: inherit;
+    }
+    .modal-close:hover { background: #e2e8f0; color: #1e293b; }
+    .modal-chart-wrap { position: relative; height: 340px; }
+
+    /* ============ TABLE ============ */
+    .data-table-wrap {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 20px; overflow: hidden; margin-bottom: 0;
+    }
+    .data-table-head {
+        padding: 18px 22px;
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap;
+    }
+    .data-table-head h3 { margin: 0; font-size: 0.95rem; color: var(--primary); display: flex; align-items: center; gap: 10px; }
+    .data-table-head h3 i { color: var(--accent); }
+    .data-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table.data-table { width: 100%; border-collapse: collapse; min-width: 620px; font-size: 0.82rem; }
+    table.data-table thead { background: #f8fafc; }
+    table.data-table thead th {
+        padding: 12px 14px; font-size: 0.72rem; font-weight: bold;
+        color: #64748b; text-align: center;
+        border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    table.data-table thead th:first-child { text-align: right; }
+    table.data-table tbody tr { border-bottom: 1px solid #f1f5f9; transition: background 0.15s ease; }
+    table.data-table tbody tr:hover { background: #f8fafc; }
+    table.data-table tbody tr:last-child { border-bottom: none; }
+    table.data-table tbody td { padding: 12px 14px; text-align: center; color: var(--text); vertical-align: middle; }
+    table.data-table tbody td:first-child { text-align: right; }
+
+    .user-cell { display: flex; align-items: center; gap: 10px; text-align: right; min-width: 0; }
+    .user-cell__avatar {
+        width: 36px; height: 36px; border-radius: 10px;
+        background: linear-gradient(135deg, #6366f1, #4f46e5);
+        color: #fff; display: flex; align-items: center; justify-content: center;
+        font-weight: bold; font-size: 0.85rem; flex-shrink: 0; overflow: hidden;
+    }
+    .user-cell__avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .user-cell__avatar.is-creator { box-shadow: 0 0 0 2px #fbbf24; }
+    .user-cell__info { min-width: 0; flex: 1; }
+    .user-cell__name {
+        font-weight: bold; color: var(--primary); font-size: 0.82rem;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        display: flex; align-items: center; gap: 5px;
+    }
+    .user-cell__name .crown { color: #fbbf24; font-size: 0.72rem; }
+    .user-cell__mobile { font-size: 0.66rem; color: #94a3b8; direction: ltr; text-align: right; margin-top: 2px; }
+
+    .cell-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 8px; font-weight: bold; font-size: 0.72rem; }
+    .cell-pill.green  { background: #d1fae5; color: #065f46; }
+    .cell-pill.orange { background: #fef3c7; color: #92400e; }
+    .cell-pill.violet { background: #ede9fe; color: #5b21b6; }
+    .cell-pill.pink   { background: #fce7f3; color: #9d174d; }
+    .cell-pill.gray   { background: #f1f5f9; color: #475569; }
+    .cell-pill.red    { background: #fee2e2; color: #991b1b; }
+    .cell-mono { font-family: Tahoma, sans-serif; font-weight: bold; color: var(--primary); }
+    .cell-mono.small { font-size: 0.75rem; color: #64748b; }
+
+    /* Progress bar در جدول */
+    .table-progress {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 90px;
+    }
+    .table-progress__track {
+        flex: 1;
+        height: 6px;
+        background: #f1f5f9;
+        border-radius: 3px;
+        overflow: hidden;
+        min-width: 50px;
+    }
+    .table-progress__fill {
+        height: 100%;
+        border-radius: 3px;
+    }
+    .table-progress__value {
+        font-size: 0.7rem;
+        font-weight: bold;
+        min-width: 32px;
+        text-align: left;
+    }
+
+    .empty-row { padding: 40px 20px; text-align: center; color: #94a3b8; font-size: 0.85rem; }
+    .empty-row i { font-size: 2rem; display: block; margin-bottom: 12px; opacity: 0.4; }
+
+    /* ============ SCHEDULING ============ */
+    .schedule-section {
+        background: linear-gradient(135deg, #f5f3ff, #ede9fe);
+        border: 2px dashed #c4b5fd;
+        border-radius: 20px; padding: 22px; margin-bottom: 20px;
+    }
+    .schedule-section__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+    .schedule-section__title-wrap { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+    .schedule-section__head h3 { margin: 0; font-size: 0.95rem; color: #6d28d9; display: flex; align-items: center; gap: 10px; }
+    .schedule-section__desc { font-size: 0.72rem; color: #a78bfa; line-height: 1.7; }
+    .schedule-badge {
+        background: #7c3aed; color: #fff;
+        font-size: 0.65rem; font-weight: bold;
+        padding: 3px 10px; border-radius: 8px;
+        letter-spacing: 0.3px; flex-shrink: 0;
+    }
+    .schedule-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .schedule-card {
+        background: #ffffff; border: 1px solid #e9d5ff;
+        border-radius: 14px; padding: 16px; text-align: center;
+        transition: all 0.15s ease;
+    }
+    .schedule-card:hover { border-color: #a855f7; box-shadow: 0 6px 16px rgba(124, 58, 237, 0.1); }
+    .schedule-card__icon {
+        width: 40px; height: 40px; border-radius: 12px;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-size: 0.95rem; margin-bottom: 10px;
+    }
+    .schedule-card__icon.violet { background: #ede9fe; color: #7c3aed; }
+    .schedule-card__icon.green  { background: #d1fae5; color: #059669; }
+    .schedule-card__icon.orange { background: #fef3c7; color: #d97706; }
+    .schedule-card__icon.red    { background: #fee2e2; color: #dc2626; }
+    .schedule-card__value { font-size: 1.6rem; font-weight: bold; color: var(--primary); line-height: 1; margin-bottom: 6px; }
+    .schedule-card__label { font-size: 0.72rem; color: #6b7280; font-weight: bold; }
+
+    /* ============ TWO COL ============ */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+    .activity-card { background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 22px; }
+    .activity-card__head { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; gap: 10px; }
+    .activity-card__title-wrap { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+    .activity-card__title { font-size: 0.9rem; font-weight: bold; color: var(--primary); display: flex; align-items: center; gap: 8px; }
+    .activity-card__title i { color: var(--accent); }
+    .activity-card__desc { font-size: 0.7rem; color: #94a3b8; line-height: 1.6; }
+    .activity-list { display: flex; flex-direction: column; gap: 4px; }
+    .activity-item { display: flex; align-items: center; gap: 12px; padding: 10px 10px; border-radius: 12px; transition: background 0.15s ease; }
+    .activity-item:hover { background: #f8fafc; }
+    .activity-item__avatar {
+        width: 38px; height: 38px; border-radius: 11px;
+        background: #f1f5f9; border: 1px solid var(--border);
+        display: flex; align-items: center; justify-content: center;
+        font-weight: bold; font-size: 0.85rem; color: var(--accent);
+        flex-shrink: 0; overflow: hidden;
+    }
+    .activity-item__avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .activity-item__avatar.rank-1 { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #fff; border-color: transparent; }
+    .activity-item__avatar.rank-2 { background: linear-gradient(135deg, #cbd5e1, #94a3b8); color: #1e293b; border-color: transparent; }
+    .activity-item__avatar.rank-3 { background: linear-gradient(135deg, #fb923c, #c2410c); color: #fff; border-color: transparent; }
+    .activity-item__info { flex: 1; min-width: 0; }
+    .activity-item__name { font-size: 0.82rem; font-weight: bold; color: var(--primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .activity-item__meta { font-size: 0.68rem; color: #94a3b8; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .activity-item__value { font-size: 0.78rem; font-weight: bold; color: var(--accent); padding: 4px 10px; background: #eff6ff; border-radius: 8px; flex-shrink: 0; }
+
+    /* ============ HAMBURGER ============ */
+    .hamburger-btn {
+        display: none; width: 44px; height: 44px; border: none;
+        background: linear-gradient(135deg, #4c8bf5 0%, #2f6bdc 100%);
+        border-radius: 13px; cursor: pointer;
+        flex-shrink: 0; align-items: center; justify-content: center;
+        padding: 0; transition: transform 0.15s ease, box-shadow 0.2s ease;
+        box-shadow: 0 6px 16px rgba(76, 139, 245, 0.25);
+    }
+    .hamburger-btn:active { transform: scale(0.95); }
+    .hamburger-btn .hamburger-lines { width: 22px; height: 16px; display: flex; flex-direction: column; justify-content: space-between; }
+    .hamburger-btn .hamburger-lines span { display: block; height: 2.5px; width: 100%; background: #fff; border-radius: 3px; transition: transform 0.3s, opacity 0.2s; transform-origin: center; }
+    .hamburger-btn .hamburger-lines span:nth-child(2) { width: 70%; }
+    .hamburger-btn.active .hamburger-lines span:nth-child(1) { transform: translateY(6.75px) rotate(45deg); }
+    .hamburger-btn.active .hamburger-lines span:nth-child(2) { opacity: 0; transform: translateX(-10px); }
+    .hamburger-btn.active .hamburger-lines span:nth-child(3) { transform: translateY(-6.75px) rotate(-45deg); }
+
+    @media (max-width: 1100px) {
+        .hero-row { grid-template-columns: 1fr; }
+        .split-row { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 900px) {
+        .hamburger-btn { display: flex; }
+        body .sidebar {
+            position: fixed !important;
+            top: 0 !important; right: 0 !important; bottom: 0 !important; left: auto !important;
+            width: 280px !important; min-width: 280px !important; max-width: 85vw !important;
+            height: 100vh !important; height: 100dvh !important;
+            max-height: 100vh !important; max-height: 100dvh !important;
+            transform: translateX(105%) !important;
+            transition: transform 0.35s cubic-bezier(0.65, 0, 0.35, 1) !important;
+            z-index: 999 !important;
+            box-shadow: -20px 0 50px rgba(0, 0, 0, 0.25) !important;
+        }
+        body .sidebar.open { transform: translateX(0) !important; }
+        .main-wrapper { width: 100%; }
+        .topbar { padding: 12px 16px; }
+        .topbar-user { display: none; }
+        .content-area { padding: 14px; }
+        .chart-wrap { height: 220px; }
+        .chart-card__desc { padding-right: 0; }
+        .modal-chart-wrap { height: 260px; }
+        .multi-select { min-width: 100%; width: 100%; }
+        .multi-select__dropdown { min-width: 100%; max-width: 100%; }
+        .two-col { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 600px) {
+        .content-area { padding: 12px; }
+        .chart-card { padding: 16px; border-radius: 16px; }
+        .chart-wrap { height: 200px; }
+        .modal-box { padding: 18px; border-radius: 16px; }
+        .modal-header h3 { font-size: 0.9rem; }
+        .speed-chip { font-size: 0.72rem; padding: 6px 10px 6px 6px; }
+        .speed-chip__avatar { width: 24px; height: 24px; }
+        .speed-chip__name { max-width: 80px; }
+        .speed-chip__hint { display: none; }
+        .hero-main, .hero-side { padding: 16px; border-radius: 16px; }
+        .hero-side__value { font-size: 2rem; }
+        .hero-main__chart { height: 220px; }
+        .hero-side__mini-chart { height: 100px; }
+        .summary-mini-grid { grid-template-columns: 1fr; }
+        .toolbar-row { padding: 12px; gap: 8px; }
+        .toolbar-row__spacer { display: none; }
+        .page-header h1 { font-size: 1.1rem; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
+    }
+
+    body, .topbar, .chart-card, .activity-card, .hero-main, .hero-side,
+    .data-table-wrap, .schedule-section, .toolbar-row, button, a, label {
+        -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none;
+    }
+    input, textarea, select { -webkit-user-select: text; user-select: text; }
+    img, a { -webkit-user-drag: none; user-drag: none; }
+</style>
+</head>
+<body>
+
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+<?php sidebar(); ?>
+
+<div class="main-wrapper">
+    <div class="topbar">
+        <div class="topbar-left">
+            <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleSidebar()" aria-label="باز کردن منو">
+                <div class="hamburger-lines"><span></span><span></span><span></span></div>
+            </button>
+            <a href="../projects/index.php" class="topbar-back" title="بازگشت به پروژه‌ها">
+                <i class="fas fa-arrow-right"></i>
+            </a>
+            <div class="topbar-project-thumb">
+                <?php if ($projectImageUrl): ?><img src="<?= htmlspecialchars($projectImageUrl) ?>" alt=""><?php else: ?><?= htmlspecialchars($projectInitial) ?><?php endif; ?>
+            </div>
+            <div class="topbar-title">
+                <h1>تحلیل‌های <?= htmlspecialchars($project['title']) ?></h1>
+                <span><span class="dot"></span> گزارش زنده از وضعیت پروژه</span>
+            </div>
+        </div>
+        <div class="topbar-user">کاربر: <?= htmlspecialchars($displayUser) ?></div>
+    </div>
+
+    <div class="content-area">
+
+        <!-- ============ PAGE HEADER ============ -->
+        <div class="page-header">
+            <h1>تحلیل‌ها</h1>
+            <div class="page-header__actions">
+                <button type="button" class="btn-outline" onclick="window.scrollTo({top:0,behavior:'smooth'})">
+                    <i class="fas fa-table-columns"></i>
+                    چیدمان
+                </button>
+                <button type="button" class="btn-outline" onclick="window.location.reload()">
+                    <i class="fas fa-sliders"></i>
+                    بروزرسانی
+                </button>
+            </div>
+        </div>
+
+        <!-- ============ HERO ROW (کارت اصلی + KPI) ============ -->
+        <div class="hero-row">
+
+            <!-- کارت اصلی با نمودار ستونی -->
+            <div class="hero-main">
+                <div class="hero-main__toolbar">
+                    <span class="hero-main__badge">
+                        <i class="fas fa-bolt"></i>
+                        داشبورد
+                    </span>
+                    <div class="hero-main__icons">
+                        <button type="button" title="ذخیره"><i class="fas fa-bookmark"></i></button>
+                        <button type="button" title="لیست"><i class="fas fa-list-ul"></i></button>
+                        <button type="button" title="صفحه"><i class="fas fa-file-lines"></i></button>
+                        <button type="button" title="پوشه"><i class="fas fa-folder"></i></button>
+                        <button type="button" title="ایمیل"><i class="fas fa-envelope"></i></button>
+                    </div>
+                </div>
+
+                <div class="hero-main__head">
+                    <div>
+                        <div class="hero-main__title">
+                            <span class="ic"><i class="fas fa-chart-column"></i></span>
+                            روند وظایف ۷ روز اخیر
+                        </div>
+                        <div class="hero-main__desc" style="padding-right: 42px;">
+                            <i class="fas fa-circle-info"></i>
+                            مقایسه وظایف ایجاد شده در برابر تکمیل شده — برای دیدن جزئیات هر روز نشانگر را نگه دارید
+                        </div>
+                    </div>
+                    <div class="hero-main__legend">
+                        <span><span class="dot" style="background:#3b82f6;"></span> ایجاد شده</span>
+                        <span><span class="dot" style="background:#10b981;"></span> تکمیل شده</span>
+                    </div>
+                </div>
+
+                <div class="hero-main__chart">
+                    <canvas id="mainBarChart"></canvas>
+                </div>
+            </div>
+
+            <!-- KPI بزرگ سمت راست -->
+            <div class="hero-side">
+                <div class="hero-side__top">
+                    <span class="hero-side__label">نرخ تکمیل وظایف</span>
+                    <select class="hero-side__select" onchange="this.value='kpi'">
+                        <option value="kpi">کل پروژه</option>
+                    </select>
+                </div>
+                <div class="hero-side__value">
+                    <?= $completionRate ?><small>%</small>
+                </div>
+                <div class="hero-side__sub">
+                    <span class="pill <?= $completionRate >= 50 ? '' : 'down' ?>">
+                        <?= $stats['completed'] ?> انجام شده
+                    </span>
+                    <span><?= $stats['pending'] ?> باقی‌مانده</span>
+                </div>
+
+                <div class="hero-side__mini-chart">
+                    <canvas id="kpiMiniChart"></canvas>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ============ TOOLBAR ============ -->
+        <div class="toolbar-row">
+            <div class="toolbar-row__title">
+                <i class="fas fa-xmark"></i>
+                گزارش تحلیلی پروژه
+                <i class="fas fa-pen edit-ic"></i>
+            </div>
+
+            <div class="toolbar-row__spacer"></div>
+
+            <div class="toolbar-row__group">
+                <i class="fas fa-calendar"></i>
+                ۷ روز اخیر
+                <i class="fas fa-chevron-down"></i>
+            </div>
+
+            <button type="button" class="toolbar-row__icon-btn" title="نمودار خطی"><i class="fas fa-chart-line"></i></button>
+            <button type="button" class="toolbar-row__icon-btn" title="نمودار ستونی"><i class="fas fa-chart-bar"></i></button>
+            <button type="button" class="toolbar-row__icon-btn" title="دانلود"><i class="fas fa-download"></i></button>
+
+            <button type="button" class="toolbar-row__save" onclick="window.location.reload()">
+                <i class="fas fa-rotate"></i>
+                بروزرسانی داده
+            </button>
+        </div>
+
+        <!-- ============ SPLIT ROW (جدول + خلاصه) ============ -->
+        <div class="split-row">
+
+            <!-- جدول اعضا -->
+            <div class="data-table-wrap">
+                <div class="data-table-head">
+                    <h3><i class="fas fa-users"></i> عملکرد اعضای پروژه</h3>
+                    <span style="font-size: 0.72rem; color: #94a3b8;">
+                        <i class="fas fa-sort"></i>
+                        مرتب بر اساس تسک انجام‌شده
+                    </span>
+                </div>
+
+                <div class="data-table-scroll">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 180px;">کاربر</th>
+                                <th>تکمیل‌شده</th>
+                                <th>نرخ تکمیل</th>
+                                <th>میانگین زمان</th>
+                                <th>یادداشت</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($membersStats)): ?>
+                                <tr><td colspan="5" class="empty-row"><i class="fas fa-users-slash"></i>عضوی وجود ندارد</td></tr>
+                            <?php else: ?>
+                                <?php foreach ($membersStats as $m): ?>
+                                    <?php
+                                        $rateColor = '#64748b';
+                                        if ($m['total'] > 0) {
+                                            if ($m['rate'] >= 70) $rateColor = '#059669';
+                                            elseif ($m['rate'] >= 40) $rateColor = '#ea580c';
+                                            else $rateColor = '#dc2626';
+                                        }
+                                    ?>
+                                    <tr>
+                                        <td>
+                                            <div class="user-cell">
+                                                <div class="user-cell__avatar <?= $m['is_creator'] ? 'is-creator' : '' ?>">
+                                                    <?php if ($m['avatar_url']): ?><img src="<?= htmlspecialchars($m['avatar_url']) ?>" alt=""><?php else: ?><?= htmlspecialchars($m['initial']) ?><?php endif; ?>
+                                                </div>
+                                                <div class="user-cell__info">
+                                                    <div class="user-cell__name">
+                                                        <?php if ($m['is_creator']): ?><i class="fas fa-crown crown"></i><?php endif; ?>
+                                                        <?= htmlspecialchars($m['name']) ?>
+                                                    </div>
+                                                    <div class="user-cell__mobile"><?= htmlspecialchars($m['mobile']) ?></div>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <span class="cell-pill green"><?= $m['completed'] ?></span>
+                                            <span style="color:#cbd5e1; font-size:0.7rem; margin-right:4px;">/ <?= $m['total'] ?></span>
+                                        </td>
+                                        <td>
+                                            <div class="table-progress">
+                                                <div class="table-progress__track">
+                                                    <div class="table-progress__fill" style="width: <?= $m['total'] > 0 ? $m['rate'] : 0 ?>%; background: <?= $rateColor ?>;"></div>
+                                                </div>
+                                                <div class="table-progress__value" style="color: <?= $rateColor ?>;">
+                                                    <?= $m['total'] > 0 ? $m['rate'] . '%' : '—' ?>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <?php if ($m['avg_hours'] > 0): ?>
+                                                <span class="cell-mono small"><?= formatDuration($m['avg_hours']) ?></span>
+                                            <?php else: ?>
+                                                <span class="cell-mono small" style="color:#cbd5e1;">—</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php if ($m['notes'] > 0): ?>
+                                                <span class="cell-pill violet"><i class="fas fa-comments" style="font-size:0.7rem;"></i><?= $m['notes'] ?></span>
+                                            <?php else: ?>
+                                                <span class="cell-mono small" style="color:#cbd5e1;">۰</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- کارت خلاصه و تحلیل -->
+            <div class="summary-card">
+                <div class="summary-card__head">
+                    <div class="summary-card__title">
+                        <i class="fas fa-wand-magic-sparkles"></i>
+                        خلاصه تحلیلی
+                    </div>
+                    <button type="button" class="toolbar-row__icon-btn" title="تنظیمات"><i class="fas fa-gear"></i></button>
+                </div>
+
+                <div class="summary-insight">
+                    <?php if ($completionRate >= 70): ?>
+                        نرخ تکمیل پروژه <strong><?= $completionRate ?>%</strong> است — عملکرد تیم <span class="highlight-green">عالی</span> ارزیابی می‌شود.
+                    <?php elseif ($completionRate >= 40): ?>
+                        نرخ تکمیل پروژه <strong><?= $completionRate ?>%</strong> است — روند <strong>متعادل</strong> ادامه دارد.
+                    <?php else: ?>
+                        نرخ تکمیل پروژه <strong><?= $completionRate ?>%</strong> است — نیاز به <span class="highlight-red">توجه بیشتر</span> دارد.
+                    <?php endif; ?>
+                    <?php if ($stats['overdue'] > 0): ?>
+                        همچنین <span class="highlight-red"><?= $stats['overdue'] ?> وظیفه</span> عقب‌افتاده وجود دارد.
+                    <?php else: ?>
+                        هیچ وظیفه عقب‌افتاده‌ای وجود ندارد. ✅
+                    <?php endif; ?>
+                </div>
+
+                <div class="summary-mini-grid">
+                    <div class="mini-metric">
+                        <div class="mini-metric__label">تیکت‌های انجام</div>
+                        <div class="mini-metric__value green"><?= $stats['on_time'] ?></div>
+                    </div>
+                    <div class="mini-metric">
+                        <div class="mini-metric__label">با تاخیر</div>
+                        <div class="mini-metric__value orange"><?= $stats['late'] ?></div>
+                    </div>
+                    <div class="mini-metric">
+                        <div class="mini-metric__label">عقب‌افتاده</div>
+                        <div class="mini-metric__value red"><?= $stats['overdue'] ?></div>
+                    </div>
+                </div>
+
+                <div class="summary-bars">
+                    <div class="summary-bar-row">
+                        <span class="label">انجام شده</span>
+                        <div class="bar-track"><div class="bar-fill" style="width: <?= $completionRate ?>%; background: linear-gradient(90deg, #10b981, #34d399);"></div></div>
+                        <span class="value"><?= $stats['completed'] ?></span>
+                    </div>
+                    <div class="summary-bar-row">
+                        <span class="label">در انتظار</span>
+                        <div class="bar-track"><div class="bar-fill" style="width: <?= $stats['total'] > 0 ? round(($stats['pending'] / $stats['total']) * 100) : 0 ?>%; background: linear-gradient(90deg, #f59e0b, #fbbf24);"></div></div>
+                        <span class="value"><?= $stats['pending'] ?></span>
+                    </div>
+                    <div class="summary-bar-row">
+                        <span class="label">اولویت زیاد</span>
+                        <div class="bar-track"><div class="bar-fill" style="width: <?= $stats['total'] > 0 ? round(($stats['high'] / $stats['total']) * 100) : 0 ?>%; background: linear-gradient(90deg, #ef4444, #f87171);"></div></div>
+                        <span class="value"><?= $stats['high'] ?></span>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ============ SPEED TREND PER USER (با دراپ‌داون) ============ -->
+        <div class="chart-card">
+            <div class="chart-card__head">
+                <div class="chart-card__title-wrap">
+                    <div class="chart-card__title">
+                        <div class="chart-card__title-icon orange"><i class="fas fa-gauge-high"></i></div>
+                        روند سرعت انجام وظایف به تفکیک کاربر (۷ روز اخیر)
+                    </div>
+                    <div class="chart-card__desc">
+                        <i class="fas fa-circle-info"></i>
+                        سرعت هر کاربر به صورت امتیاز نمایش داده می‌شود؛ <strong style="color:#059669;">بالاتر = سریع‌تر = بهتر</strong> · <strong style="color:#dc2626;">پایین‌تر = کندتر</strong>
+                    </div>
+                </div>
+
+                <div class="multi-select" id="speedUserMS">
+                    <button type="button" class="multi-select__trigger" onclick="toggleMultiSelect(event, 'speedUserMS')">
+                        <i class="fas fa-users"></i>
+                        <span class="multi-select__label" id="speedUserLabel">انتخاب کاربران</span>
+                        <span class="multi-select__count" id="speedUserCount">۰/۵</span>
+                        <i class="fas fa-chevron-down multi-select__chevron"></i>
+                    </button>
+                    <div class="multi-select__dropdown">
+                        <div class="multi-select__header"><span><i class="fas fa-info-circle"></i> حداکثر ۵ کاربر را انتخاب کنید</span></div>
+                        <div class="multi-select__list" id="speedUserList"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="chart-wrap" style="height: 300px;">
+                <canvas id="speedTrendChart"></canvas>
+                <?php if (empty($speedTrend['users'])): ?>
+                    <div style="text-align:center; color:#94a3b8; padding:60px 20px; font-size:0.85rem; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px;">
+                        <i class="fas fa-chart-line" style="font-size:2rem; opacity:0.3;"></i>
+                        <span>در ۷ روز اخیر تسکی تکمیل نشده است</span>
+                    </div>
+                <?php endif; ?>
+            </div>
+            <?php if (!empty($speedTrend['users'])): ?>
+                <div class="speed-legend" id="speedLegend"></div>
+            <?php endif; ?>
+        </div>
+
+        <!-- ============ میانگین زمان روزانه ============ -->
+        <div class="chart-card">
+            <div class="chart-card__head">
+                <div class="chart-card__title-wrap">
+                    <div class="chart-card__title">
+                        <div class="chart-card__title-icon teal"><i class="fas fa-stopwatch-20"></i></div>
+                        میانگین زمان انجام روزانه (۷ روز اخیر)
+                    </div>
+                    <div class="chart-card__desc">
+                        <i class="fas fa-circle-info"></i>
+                        میانگین زمان لازم برای تکمیل وظایف در هر روز — <strong style="color:#059669;">نزولی = بهبود سرعت تیم</strong>
+                    </div>
+                </div>
+                <div class="chart-card__legend">
+                    <div class="legend-item"><span class="legend-dot orange"></span> میانگین زمان (ساعت)</div>
+                </div>
+            </div>
+            <div class="chart-wrap" style="height: 300px;"><canvas id="avgTrendChart"></canvas></div>
+        </div>
+
+        <!-- ============ MONTHLY + SUBJECT ============ -->
+        <div class="charts-row-2" style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+            <div class="chart-card" style="margin-bottom: 0;">
+                <div class="chart-card__head">
+                    <div class="chart-card__title-wrap">
+                        <div class="chart-card__title">
+                            <div class="chart-card__title-icon violet"><i class="fas fa-chart-line"></i></div>
+                            روند ۶ ماه اخیر
+                        </div>
+                        <div class="chart-card__desc">
+                            <i class="fas fa-circle-info"></i>
+                            تعداد کل وظایف ایجاد و تکمیل شده در ۶ ماه گذشته
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-wrap"><canvas id="monthlyChart"></canvas></div>
+            </div>
+
+            <div class="chart-card" style="margin-bottom: 0;">
+                <div class="chart-card__head">
+                    <div class="chart-card__title-wrap">
+                        <div class="chart-card__title">
+                            <div class="chart-card__title-icon teal"><i class="fas fa-tags"></i></div>
+                            توزیع موضوعات
+                        </div>
+                        <div class="chart-card__desc">
+                            <i class="fas fa-circle-info"></i>
+                            سهم هر موضوع از کل وظایف پروژه
+                        </div>
+                    </div>
+
+                    <div class="multi-select" id="subjectMS">
+                        <button type="button" class="multi-select__trigger" onclick="toggleMultiSelect(event, 'subjectMS')">
+                            <i class="fas fa-tags"></i>
+                            <span class="multi-select__label" id="subjectLabel">انتخاب موضوعات</span>
+                            <span class="multi-select__count" id="subjectCount">۰/۵</span>
+                            <i class="fas fa-chevron-down multi-select__chevron"></i>
+                        </button>
+                        <div class="multi-select__dropdown">
+                            <div class="multi-select__header"><span><i class="fas fa-info-circle"></i> حداکثر ۵ موضوع را انتخاب کنید</span></div>
+                            <div class="multi-select__list" id="subjectList"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="subjectChart"></canvas>
+                    <?php if (empty($subjectLabels)): ?>
+                        <div style="text-align:center; color:#94a3b8; padding:60px 20px; font-size:0.85rem; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px;">
+                            <i class="fas fa-tags" style="font-size:2rem; opacity:0.3;"></i>
+                            <span>هنوز وظیفه‌ای به موضوع اختصاص نیافته است</span>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ زمانبندی ============ -->
+        <div class="schedule-section" style="margin-top: 20px;">
+            <div class="schedule-section__head">
+                <div class="schedule-section__title-wrap">
+                    <h3><i class="fas fa-calendar-clock"></i> تحلیل زمانبندی</h3>
+                    <div class="schedule-section__desc">بررسی عملکرد وظایف بر اساس تاریخ سررسید و مهلت تعیین‌شده</div>
+                </div>
+                <span class="schedule-badge"><i class="fas fa-flask" style="margin-left: 4px;"></i> زیرساخت آماده</span>
+            </div>
+
+            <div class="schedule-grid">
+                <div class="schedule-card">
+                    <div class="schedule-card__icon violet"><i class="fas fa-calendar-check"></i></div>
+                    <div class="schedule-card__value"><?= $stats['with_due'] ?></div>
+                    <div class="schedule-card__label">وظایف دارای مهلت</div>
+                </div>
+                <div class="schedule-card">
+                    <div class="schedule-card__icon green"><i class="fas fa-check-circle"></i></div>
+                    <div class="schedule-card__value" style="color:#059669;"><?= $stats['on_time'] ?></div>
+                    <div class="schedule-card__label">به موقع انجام شده</div>
+                </div>
+                <div class="schedule-card">
+                    <div class="schedule-card__icon orange"><i class="fas fa-exclamation-triangle"></i></div>
+                    <div class="schedule-card__value" style="color:#d97706;"><?= $stats['late'] ?></div>
+                    <div class="schedule-card__label">با تاخیر انجام شده</div>
+                </div>
+                <div class="schedule-card">
+                    <div class="schedule-card__icon red"><i class="fas fa-clock-rotate-left"></i></div>
+                    <div class="schedule-card__value" style="color:#dc2626;"><?= $stats['overdue'] ?></div>
+                    <div class="schedule-card__label">عقب‌افتاده (در انتظار)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ یادداشت‌نویس + فعالیت ============ -->
+        <div class="two-col">
+            <div class="activity-card">
+                <div class="activity-card__head">
+                    <div class="activity-card__title-wrap">
+                        <div class="activity-card__title"><i class="fas fa-pen-fancy"></i> پرکارترین یادداشت‌نویس‌ها</div>
+                        <div class="activity-card__desc">اعضایی که بیشترین یادداشت را در وظایف پروژه ثبت کرده‌اند</div>
+                    </div>
+                </div>
+                <div class="activity-list">
+                    <?php if (empty($topNoteWriters)): ?>
+                        <div style="text-align: center; padding: 30px 20px; color: #94a3b8; font-size: 0.82rem;">
+                            <i class="fas fa-comment-slash" style="font-size: 1.5rem; display: block; margin-bottom: 10px; opacity: 0.4;"></i>
+                            هنوز یادداشتی ثبت نشده است
+                        </div>
+                    <?php else: ?>
+                        <?php foreach ($topNoteWriters as $idx => $w): ?>
+                            <div class="activity-item">
+                                <div class="activity-item__avatar <?= $idx < 3 ? 'rank-' . ($idx + 1) : '' ?>">
+                                    <?php if ($w['avatar_url']): ?><img src="<?= htmlspecialchars($w['avatar_url']) ?>" alt=""><?php else: ?><?= htmlspecialchars($w['initial']) ?><?php endif; ?>
+                                </div>
+                                <div class="activity-item__info">
+                                    <div class="activity-item__name"><?= htmlspecialchars($w['name']) ?></div>
+                                    <div class="activity-item__meta"><?= htmlspecialchars($w['mobile']) ?></div>
+                                </div>
+                                <div class="activity-item__value"><?= number_format($w['count']) ?></div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <div class="activity-card">
+                <div class="activity-card__head">
+                    <div class="activity-card__title-wrap">
+                        <div class="activity-card__title"><i class="fas fa-wave-square"></i> آخرین فعالیت‌های پروژه</div>
+                        <div class="activity-card__desc">جدیدترین وظایف ایجاد شده و یادداشت‌های ثبت‌شده در پروژه</div>
+                    </div>
+                </div>
+                <div class="activity-list">
+                    <?php if (empty($recentActivities)): ?>
+                        <div style="text-align: center; padding: 30px 20px; color: #94a3b8; font-size: 0.82rem;">
+                            <i class="fas fa-inbox" style="font-size: 1.5rem; display: block; margin-bottom: 10px; opacity: 0.4;"></i>
+                            فعالیتی برای نمایش وجود ندارد
+                        </div>
+                    <?php else: ?>
+                        <?php foreach ($recentActivities as $a): ?>
+                            <?php
+                                $uName = trim(($a['first_name'] ?? '') . ' ' . ($a['last_name'] ?? ''));
+                                if ($uName === '') $uName = $a['u_mobile'] ?? 'کاربر';
+                                $isTask = ($a['type'] === 'task');
+                            ?>
+                            <div class="activity-item">
+                                <div class="activity-item__avatar" style="<?= $isTask ? 'background:#dbeafe;color:#2563eb;' : 'background:#ede9fe;color:#7c3aed;' ?>">
+                                    <i class="fas <?= $isTask ? 'fa-plus' : 'fa-comment' ?>"></i>
+                                </div>
+                                <div class="activity-item__info">
+                                    <div class="activity-item__name">
+                                        <?= htmlspecialchars($uName) ?>
+                                        <span style="font-weight: normal; color: #94a3b8; font-size: 0.72rem;">
+                                            <?= $isTask ? 'وظیفه‌ای ایجاد کرد' : 'یادداشتی ثبت کرد' ?>
+                                        </span>
+                                    </div>
+                                    <div class="activity-item__meta" title="<?= htmlspecialchars($a['label']) ?>">
+                                        <?= htmlspecialchars(mb_substr($a['label'], 0, 50, 'UTF-8')) ?><?= mb_strlen($a['label']) > 50 ? '...' : '' ?>
+                                    </div>
+                                </div>
+                                <div class="activity-item__value" style="font-size:0.68rem;color:#64748b;background:#f1f5f9;">
+                                    <?= htmlspecialchars(formatPersianDate($a['at_time'], false)) ?>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ================== MODAL: نمودار اختصاصی کاربر ================== -->
+<div id="userSpeedModal" class="modal-overlay" onclick="if(event.target === this) closeUserModal()">
+    <div class="modal-box" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h3>
+                <span class="modal-avatar" id="modalAvatar"><i class="fas fa-user"></i></span>
+                روند سرعت انجام — <span id="modalUserName">کاربر</span>
+            </h3>
+            <button class="modal-close" onclick="closeUserModal()">&times;</button>
+        </div>
+
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+            <div style="font-size:0.75rem; color:#64748b; line-height:1.8;">
+                <i class="fas fa-circle-info" style="color:#cbd5e1; margin-left:4px;"></i>
+                نمودار اختصاصی این کاربر در ۷ روز اخیر — <strong style="color:#059669;">بالاتر = سریع‌تر</strong>
+            </div>
+            <div style="font-size:0.72rem; color:#94a3b8;">
+                <i class="fas fa-chart-line"></i>
+                امتیاز سرعت
+            </div>
+        </div>
+
+        <div class="modal-chart-wrap">
+            <canvas id="userModalChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+window.ANALYTICS_DATA = <?= $dashboardDataJson ?>;
+
+function formatDurationJS(hours) {
+    hours = parseFloat(hours) || 0;
+    if (hours <= 0) return '—';
+    if (hours < 1) { const m = Math.round(hours * 60); return m < 1 ? 'کمتر از ۱ دقیقه' : m + ' دقیقه'; }
+    if (hours < 24) {
+        const h = Math.floor(hours); const m = Math.round((hours - h) * 60);
+        return m === 0 ? h + ' ساعت' : h + ' ساعت و ' + m + ' دقیقه';
+    }
+    const days = Math.floor(hours / 24); const remH = hours - days * 24;
+    const h = Math.floor(remH); const m = Math.round((remH - h) * 60);
+    let r = days + ' روز';
+    if (h > 0) r += ' و ' + h + ' ساعت';
+    if (m > 0 && h === 0) r += ' و ' + m + ' دقیقه';
+    return r;
+}
+
+function hexToRgba(hex, alpha) {
+    if (!hex) return 'rgba(59, 130, 246, ' + alpha + ')';
+    let h = hex.replace('#', '');
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    const r = parseInt(h.substring(0, 2), 16);
+    const g = parseInt(h.substring(2, 4), 16);
+    const b = parseInt(h.substring(4, 6), 16);
+    return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + alpha + ')';
+}
+
+function hoursToSpeedScore(h) {
+    if (h === null || h === undefined || h <= 0) return null;
+    return Math.round(1000 / (h + 1));
+}
+
+function escapeHtmlAnalytics(s) {
+    if (s === null || s === undefined) return '';
+    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+    return String(s).replace(/[&<>"']/g, function(m) { return map[m]; });
+}
+
+const AnalyticsState = {
+    speedUsers: new Set(),
+    subjects: new Set(),
+    speedChart: null,
+    subjectChart: null,
+    mainBarChart: null,
+    kpiMiniChart: null,
+    modalChart: null,
+    activeModalUser: null,
+    MAX_SPEED: 5,
+    MAX_SUBJECTS: 5
+};
+
+let GLOBAL_DASHBOARD = null;
+const TOOLTIP_STYLE = {
+    backgroundColor: '#1e293b', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1,
+    padding: 12, cornerRadius: 10, titleColor: '#f8fafc', bodyColor: '#cbd5e1',
+    titleFont: { size: 12, weight: 'bold' }, bodyFont: { size: 12 },
+    boxPadding: 6, usePointStyle: true, displayColors: true,
+};
+const GRID_STYLE = { color: 'rgba(148, 163, 184, 0.15)', drawBorder: false };
+
+// ================== Multi-Select ==================
+function toggleMultiSelect(event, id) {
+    if (event) event.stopPropagation();
+    const el = document.getElementById(id);
+    if (!el) return;
+    const wasOpen = el.classList.contains('open');
+    document.querySelectorAll('.multi-select').forEach(ms => ms.classList.remove('open'));
+    if (!wasOpen) el.classList.add('open');
+}
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.multi-select')) {
+        document.querySelectorAll('.multi-select.open').forEach(ms => ms.classList.remove('open'));
+    }
+});
+
+// ================== Speed User List ==================
+function renderSpeedUserList() {
+    const list = document.getElementById('speedUserList');
+    if (!list) return;
+    if (!GLOBAL_DASHBOARD.speedTrend || !GLOBAL_DASHBOARD.speedTrend.users) {
+        list.innerHTML = '<div style="padding:20px; text-align:center; color:#94a3b8; font-size:0.8rem;">کاربری برای نمایش نیست</div>';
+        return;
+    }
+    const users = GLOBAL_DASHBOARD.speedTrend.users;
+    let html = '';
+    const selectedCount = AnalyticsState.speedUsers.size;
+    users.forEach(u => {
+        const isSelected = AnalyticsState.speedUsers.has(u.name);
+        const isDisabled = !isSelected && selectedCount >= AnalyticsState.MAX_SPEED;
+        const avatarHtml = u.avatar_url ? '<img src="' + escapeHtmlAnalytics(u.avatar_url) + '" alt="">' : escapeHtmlAnalytics(u.initial || '?');
+        const crown = u.is_creator ? '<i class="fas fa-crown crown"></i>' : '';
+        html += `
+            <div class="multi-select__item ${isSelected ? 'selected' : ''} ${isDisabled ? 'disabled' : ''}" onclick="toggleSpeedUser('${escapeHtmlAnalytics(u.name).replace(/'/g, "\\'")}')">
+                <span class="multi-select__check"><i class="fas fa-check"></i></span>
+                <span class="multi-select__avatar">${avatarHtml}</span>
+                <span class="multi-select__name">${crown}${escapeHtmlAnalytics(u.name)}</span>
+                <span class="multi-select__color-dot" style="background:${escapeHtmlAnalytics(u.color)};"></span>
+            </div>`;
+    });
+    list.innerHTML = html;
+    const countEl = document.getElementById('speedUserCount');
+    const labelEl = document.getElementById('speedUserLabel');
+    if (countEl) countEl.textContent = selectedCount + '/' + AnalyticsState.MAX_SPEED;
+    if (labelEl) {
+        if (selectedCount === 0) labelEl.textContent = 'انتخاب کاربران';
+        else if (selectedCount === 1) labelEl.textContent = Array.from(AnalyticsState.speedUsers)[0];
+        else labelEl.textContent = selectedCount + ' کاربر انتخاب شده';
+    }
+}
+function toggleSpeedUser(name) {
+    const wasSelected = AnalyticsState.speedUsers.has(name);
+    if (!wasSelected && AnalyticsState.speedUsers.size >= AnalyticsState.MAX_SPEED) return;
+    if (wasSelected) AnalyticsState.speedUsers.delete(name);
+    else AnalyticsState.speedUsers.add(name);
+    renderSpeedUserList();
+    renderSpeedChart();
+    renderSpeedLegend();
+}
+
+// ================== Subject List ==================
+function renderSubjectList() {
+    const list = document.getElementById('subjectList');
+    if (!list) return;
+    const labels = GLOBAL_DASHBOARD.subjectLabels || [];
+    const counts = GLOBAL_DASHBOARD.subjectCounts || [];
+    if (!labels.length) {
+        list.innerHTML = '<div style="padding:20px; text-align:center; color:#94a3b8; font-size:0.8rem;">موضوعی برای نمایش نیست</div>';
+        return;
+    }
+    const colors = ['#2563eb', '#10b981', '#7c3aed', '#f59e0b', '#ec4899', '#14b8a6', '#ef4444', '#6366f1', '#0891b2', '#d946ef'];
+    const selectedCount = AnalyticsState.subjects.size;
+    let html = '';
+    labels.forEach((label, i) => {
+        const isSelected = AnalyticsState.subjects.has(label);
+        const isDisabled = !isSelected && selectedCount >= AnalyticsState.MAX_SUBJECTS;
+        const color = colors[i % colors.length];
+        html += `
+            <div class="multi-select__item ${isSelected ? 'selected' : ''} ${isDisabled ? 'disabled' : ''}" onclick="toggleSubject('${escapeHtmlAnalytics(label).replace(/'/g, "\\'")}')">
+                <span class="multi-select__check"><i class="fas fa-check"></i></span>
+                <span class="multi-select__color-dot" style="background:${color};"></span>
+                <span class="multi-select__name">${escapeHtmlAnalytics(label)}</span>
+                <span class="multi-select__count-badge">${counts[i] || 0}</span>
+            </div>`;
+    });
+    list.innerHTML = html;
+    const countEl = document.getElementById('subjectCount');
+    const labelEl = document.getElementById('subjectLabel');
+    if (countEl) countEl.textContent = selectedCount + '/' + AnalyticsState.MAX_SUBJECTS;
+    if (labelEl) {
+        if (selectedCount === 0) labelEl.textContent = 'انتخاب موضوعات';
+        else if (selectedCount === 1) labelEl.textContent = Array.from(AnalyticsState.subjects)[0];
+        else labelEl.textContent = selectedCount + ' موضوع انتخاب شده';
+    }
+}
+function toggleSubject(title) {
+    const wasSelected = AnalyticsState.subjects.has(title);
+    if (!wasSelected && AnalyticsState.subjects.size >= AnalyticsState.MAX_SUBJECTS) return;
+    if (wasSelected) AnalyticsState.subjects.delete(title);
+    else AnalyticsState.subjects.add(title);
+    renderSubjectList();
+    renderSubjectChart();
+}
+
+// ================== Speed Legend ==================
+function renderSpeedLegend() {
+    const legend = document.getElementById('speedLegend');
+    if (!legend) return;
+    const users = GLOBAL_DASHBOARD.speedTrend ? GLOBAL_DASHBOARD.speedTrend.users : [];
+    const visible = users.filter(u => AnalyticsState.speedUsers.has(u.name));
+    if (!visible.length) {
+        legend.innerHTML = '<div style="text-align:center; color:#94a3b8; font-size:0.78rem; padding:10px;">کاربری انتخاب نشده است — از منوی بالا انتخاب کنید</div>';
+        return;
+    }
+    let html = '';
+    visible.forEach(u => {
+        const avatarHtml = u.avatar_url ? '<img src="' + escapeHtmlAnalytics(u.avatar_url) + '" alt="">' : escapeHtmlAnalytics(u.initial || '?');
+        const crown = u.is_creator ? '<i class="fas fa-crown" style="color:#fbbf24; font-size:0.6rem; margin-left:3px;"></i>' : '';
+        html += `
+            <button type="button" class="speed-chip" onclick="openUserModal('${escapeHtmlAnalytics(u.name).replace(/'/g, "\\'")}')" title="مشاهده نمودار اختصاصی">
+                <span class="speed-chip__avatar" style="background:${escapeHtmlAnalytics(u.color)};">${avatarHtml}</span>
+                <span class="speed-chip__info">
+                    <span class="speed-chip__name">${crown}${escapeHtmlAnalytics(u.name)}</span>
+                    <span class="speed-chip__hint">مشاهده پروفایل نمودار</span>
+                </span>
+                <i class="fas fa-chart-line speed-chip__arrow"></i>
+            </button>`;
+    });
+    legend.innerHTML = html;
+}
+
+// ================== Speed Chart ==================
+function renderSpeedChart() {
+    const canvas = document.getElementById('speedTrendChart');
+    if (!canvas) return;
+    const D = GLOBAL_DASHBOARD;
+    if (!D.speedTrend || !D.speedTrend.users || !D.speedTrend.users.length) return;
+    const visibleUsers = D.speedTrend.users.filter(u => AnalyticsState.speedUsers.has(u.name));
+    if (AnalyticsState.speedChart) { AnalyticsState.speedChart.destroy(); AnalyticsState.speedChart = null; }
+    if (!visibleUsers.length) return;
+
+    let maxScore = 0;
+    visibleUsers.forEach(u => { (u.data || []).forEach(v => { const s = hoursToSpeedScore(v); if (s !== null && s > maxScore) maxScore = s; }); });
+    if (maxScore < 10) maxScore = 10;
+
+    const ctx = canvas.getContext('2d');
+    const datasets = visibleUsers.map(u => {
+        const scoreData = (u.data || []).map(v => hoursToSpeedScore(v));
+        const origData = (u.data || []).slice();
+        const grad = ctx.createLinearGradient(0, 0, 0, 300);
+        grad.addColorStop(0, hexToRgba(u.color, 0.45));
+        grad.addColorStop(0.35, hexToRgba(u.color, 0.20));
+        grad.addColorStop(0.7, hexToRgba(u.color, 0.08));
+        grad.addColorStop(1, hexToRgba(u.color, 0.02));
+        return {
+            label: u.name, data: scoreData, _origHours: origData, _color: u.color,
+            borderColor: u.color, backgroundColor: grad, borderWidth: 2.5, tension: 0.55,
+            spanGaps: true, fill: true,
+            pointBackgroundColor: u.color, pointBorderColor: '#ffffff', pointBorderWidth: 2.5,
+            pointRadius: 5, pointHoverRadius: 8, pointHoverBorderWidth: 3,
+        };
+    });
+
+    AnalyticsState.speedChart = new Chart(canvas, {
+        type: 'line',
+        data: { labels: D.trendDays, datasets: datasets },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: { ...TOOLTIP_STYLE, callbacks: {
+                    label: function(ctx) {
+                        const idx = ctx.dataIndex;
+                        const origHours = (ctx.dataset._origHours || [])[idx];
+                        if (origHours === null || origHours === undefined) return ctx.dataset.label + ': بدون داده';
+                        return ctx.dataset.label + ': ' + formatDurationJS(origHours);
+                    }
+                }},
+            },
+            scales: {
+                y: { beginAtZero: true, suggestedMax: maxScore, title: { display: true, text: 'امتیاز سرعت (بالاتر = سریع‌تر)', color: '#94a3b8', font: { size: 10, weight: 'bold' } }, ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: 'rgba(148, 163, 184, 0.14)', drawBorder: false, drawTicks: false }, border: { display: false } },
+                x: { grid: { display: false }, border: { display: false }, ticks: { color: '#64748b', font: { size: 10, weight: 'bold' }, padding: 6 } }
+            }
+        }
+    });
+}
+
+// ================== Subject Chart ==================
+function renderSubjectChart() {
+    const canvas = document.getElementById('subjectChart');
+    if (!canvas) return;
+    const D = GLOBAL_DASHBOARD;
+    const allLabels = D.subjectLabels || [];
+    const allCounts = D.subjectCounts || [];
+    if (AnalyticsState.subjectChart) { AnalyticsState.subjectChart.destroy(); AnalyticsState.subjectChart = null; }
+    if (!allLabels.length) return;
+
+    const colors = ['#2563eb', '#10b981', '#7c3aed', '#f59e0b', '#ec4899', '#14b8a6', '#ef4444', '#6366f1', '#0891b2', '#d946ef'];
+    const labels = []; const counts = []; const bgColors = [];
+    allLabels.forEach((label, i) => {
+        if (AnalyticsState.subjects.has(label)) { labels.push(label); counts.push(allCounts[i] || 0); bgColors.push(colors[i % colors.length]); }
+    });
+    if (!labels.length) return;
+
+    AnalyticsState.subjectChart = new Chart(canvas, {
+        type: 'doughnut',
+        data: { labels: labels, datasets: [{ data: counts, backgroundColor: bgColors, borderColor: '#ffffff', borderWidth: 3, hoverOffset: 10 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false, cutout: '65%',
+            plugins: {
+                legend: { position: 'bottom', labels: { padding: 10, color: '#475569', font: { size: 10, weight: 'bold' }, usePointStyle: true, pointStyle: 'circle', boxWidth: 7 } },
+                tooltip: TOOLTIP_STYLE,
+            }
+        }
+    });
+}
+
+// ================== Main Bar Chart (روند ۷ روز - ستونی) ==================
+function renderMainBarChart() {
+    const canvas = document.getElementById('mainBarChart');
+    if (!canvas) return;
+    const D = GLOBAL_DASHBOARD;
+
+    if (AnalyticsState.mainBarChart) { AnalyticsState.mainBarChart.destroy(); AnalyticsState.mainBarChart = null; }
+
+    const ctx = canvas.getContext('2d');
+    const gCreated = ctx.createLinearGradient(0, 0, 0, 300);
+    gCreated.addColorStop(0, 'rgba(59, 130, 246, 0.95)');
+    gCreated.addColorStop(1, 'rgba(59, 130, 246, 0.55)');
+
+    const gCompleted = ctx.createLinearGradient(0, 0, 0, 300);
+    gCompleted.addColorStop(0, 'rgba(16, 185, 129, 0.95)');
+    gCompleted.addColorStop(1, 'rgba(16, 185, 129, 0.55)');
+
+    AnalyticsState.mainBarChart = new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: D.trendDays,
+            datasets: [
+                {
+                    label: 'ایجاد شده',
+                    data: D.trendCreated,
+                    backgroundColor: gCreated,
+                    borderRadius: 8,
+                    borderSkipped: false,
+                    barPercentage: 0.7,
+                    categoryPercentage: 0.65,
+                },
+                {
+                    label: 'تکمیل شده',
+                    data: D.trendCompleted,
+                    backgroundColor: gCompleted,
+                    borderRadius: 8,
+                    borderSkipped: false,
+                    barPercentage: 0.7,
+                    categoryPercentage: 0.65,
+                }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: TOOLTIP_STYLE,
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: { stepSize: 1, precision: 0, color: '#64748b', font: { size: 10 }, padding: 8 },
+                    grid: { color: 'rgba(148, 163, 184, 0.12)', drawBorder: false, drawTicks: false },
+                    border: { display: false },
+                },
+                x: {
+                    grid: { display: false },
+                    border: { display: false },
+                    ticks: { color: '#64748b', font: { size: 10, weight: 'bold' }, padding: 6 }
+                }
+            }
+        }
+    });
+}
+
+// ================== KPI Mini Chart (سمت راست) ==================
+function renderKpiMiniChart() {
+    const canvas = document.getElementById('kpiMiniChart');
+    if (!canvas) return;
+    const D = GLOBAL_DASHBOARD;
+    if (AnalyticsState.kpiMiniChart) { AnalyticsState.kpiMiniChart.destroy(); AnalyticsState.kpiMiniChart = null; }
+
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createLinearGradient(0, 0, 0, 130);
+    grad.addColorStop(0, 'rgba(37, 99, 235, 0.55)');
+    grad.addColorStop(1, 'rgba(37, 99, 235, 0.02)');
+
+    AnalyticsState.kpiMiniChart = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: D.trendDays,
+            datasets: [{
+                data: D.trendCompleted,
+                borderColor: '#2563eb',
+                backgroundColor: grad,
+                borderWidth: 2.5,
+                tension: 0.55,
+                fill: true,
+                pointRadius: 0,
+                pointHoverRadius: 6,
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { ...TOOLTIP_STYLE, callbacks: { label: function(ctx) { return 'تکمیل شده: ' + ctx.parsed.y; } } } },
+            scales: {
+                y: { display: false, beginAtZero: true },
+                x: { display: false }
+            }
+        }
+    });
+}
+
+// ================== User Modal ==================
+function openUserModal(userName) {
+    const D = GLOBAL_DASHBOARD;
+    const user = D.speedTrend.users.find(u => u.name === userName);
+    if (!user) return;
+    AnalyticsState.activeModalUser = userName;
+    const nameEl = document.getElementById('modalUserName');
+    if (nameEl) nameEl.textContent = userName;
+    const avatarEl = document.getElementById('modalAvatar');
+    if (avatarEl) {
+        if (user.avatar_url) avatarEl.innerHTML = '<img src="' + escapeHtmlAnalytics(user.avatar_url) + '" alt="">';
+        else avatarEl.textContent = user.initial || '?';
+        avatarEl.style.background = user.color;
+    }
+    document.getElementById('userSpeedModal').classList.add('active');
+    document.body.style.overflow = 'hidden';
+
+    const canvas = document.getElementById('userModalChart');
+    if (!canvas) return;
+    if (AnalyticsState.modalChart) { AnalyticsState.modalChart.destroy(); AnalyticsState.modalChart = null; }
+
+    const scoreData = (user.data || []).map(v => hoursToSpeedScore(v));
+    const origData = (user.data || []).slice();
+    let maxScore = 0;
+    scoreData.forEach(s => { if (s !== null && s > maxScore) maxScore = s; });
+    if (maxScore < 10) maxScore = 10;
+
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createLinearGradient(0, 0, 0, 340);
+    grad.addColorStop(0, hexToRgba(user.color, 0.50));
+    grad.addColorStop(0.35, hexToRgba(user.color, 0.22));
+    grad.addColorStop(0.7, hexToRgba(user.color, 0.08));
+    grad.addColorStop(1, hexToRgba(user.color, 0.02));
+
+    AnalyticsState.modalChart = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: D.trendDays,
+            datasets: [{
+                label: userName, data: scoreData, _origHours: origData,
+                borderColor: user.color, backgroundColor: grad,
+                borderWidth: 3, tension: 0.55, spanGaps: true, fill: true,
+                pointBackgroundColor: user.color, pointBorderColor: '#ffffff', pointBorderWidth: 3,
+                pointRadius: 6, pointHoverRadius: 10, pointHoverBorderWidth: 3,
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: { ...TOOLTIP_STYLE, callbacks: {
+                    title: function(items) { if (items.length) return 'روز ' + items[0].label; return ''; },
+                    label: function(ctx) {
+                        const idx = ctx.dataIndex;
+                        const origHours = (ctx.dataset._origHours || [])[idx];
+                        if (origHours === null || origHours === undefined) return 'بدون داده';
+                        const score = hoursToSpeedScore(origHours);
+                        return ['زمان میانگین: ' + formatDurationJS(origHours), 'امتیاز سرعت: ' + score];
+                    }
+                }},
+            },
+            scales: {
+                y: { beginAtZero: true, suggestedMax: maxScore, title: { display: true, text: 'امتیاز سرعت', color: '#94a3b8', font: { size: 10, weight: 'bold' } }, ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: 'rgba(148, 163, 184, 0.14)', drawBorder: false, drawTicks: false }, border: { display: false } },
+                x: { grid: { display: false }, border: { display: false }, ticks: { color: '#64748b', font: { size: 11, weight: 'bold' }, padding: 6 } }
+            }
+        }
+    });
+}
+function closeUserModal() {
+    document.getElementById('userSpeedModal').classList.remove('active');
+    document.body.style.overflow = '';
+    if (AnalyticsState.modalChart) { AnalyticsState.modalChart.destroy(); AnalyticsState.modalChart = null; }
+    AnalyticsState.activeModalUser = null;
+}
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && AnalyticsState.activeModalUser) closeUserModal();
+});
+
+// ================== Init ==================
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof Chart === 'undefined') return;
+    const D = window.ANALYTICS_DATA;
+    if (!D) return;
+    GLOBAL_DASHBOARD = D;
+
+    Chart.defaults.font.family = 'Tahoma, sans-serif';
+    Chart.defaults.font.size = 11;
+    Chart.defaults.color = '#64748b';
+
+    // انتخاب پیش‌فرض کاربران
+    if (D.speedTrend && D.speedTrend.users) {
+        D.speedTrend.users.slice(0, AnalyticsState.MAX_SPEED).forEach(u => AnalyticsState.speedUsers.add(u.name));
+    }
+    // انتخاب پیش‌فرض موضوعات
+    if (D.subjectLabels) {
+        D.subjectLabels.slice(0, AnalyticsState.MAX_SUBJECTS).forEach(s => AnalyticsState.subjects.add(s));
+    }
+
+    renderSpeedUserList();
+    renderSubjectList();
+    renderSpeedLegend();
+    renderSpeedChart();
+    renderSubjectChart();
+    renderMainBarChart();
+    renderKpiMiniChart();
+
+    // ===== میانگین زمان روزانه =====
+    const avgTrCtx = document.getElementById('avgTrendChart');
+    if (avgTrCtx && D.trendAvgHours) {
+        const c = avgTrCtx.getContext('2d');
+        const gAvg = c.createLinearGradient(0, 0, 0, 300);
+        gAvg.addColorStop(0, 'rgba(234, 88, 12, 0.55)');
+        gAvg.addColorStop(0.35, 'rgba(234, 88, 12, 0.28)');
+        gAvg.addColorStop(0.7, 'rgba(234, 88, 12, 0.10)');
+        gAvg.addColorStop(1, 'rgba(234, 88, 12, 0.02)');
+
+        new Chart(avgTrCtx, {
+            type: 'line',
+            data: { labels: D.trendDays, datasets: [{
+                label: 'میانگین زمان (ساعت)', data: D.trendAvgHours,
+                borderColor: '#ea580c', backgroundColor: gAvg,
+                borderWidth: 2.5, tension: 0.55, spanGaps: true, fill: true,
+                pointBackgroundColor: '#ea580c', pointBorderColor: '#ffffff', pointBorderWidth: 2.5,
+                pointRadius: 5, pointHoverRadius: 8, pointHoverBorderWidth: 3,
+            }]},
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: { legend: { display: false }, tooltip: { ...TOOLTIP_STYLE, callbacks: { label: function(ctx) { if (ctx.parsed.y === null || ctx.parsed.y === undefined) return 'بدون داده'; return 'میانگین زمان: ' + formatDurationJS(ctx.parsed.y); } } } },
+                scales: {
+                    y: { beginAtZero: true, title: { display: true, text: 'ساعت', color: '#94a3b8', font: { size: 10, weight: 'bold' } }, ticks: { color: '#64748b', font: { size: 10 }, padding: 8, callback: function(v) { return v + 'h'; } }, grid: { color: 'rgba(148, 163, 184, 0.14)', drawBorder: false, drawTicks: false }, border: { display: false } },
+                    x: { grid: { display: false }, border: { display: false }, ticks: { color: '#64748b', font: { size: 10, weight: 'bold' }, padding: 6 } }
+                }
+            }
+        });
+    }
+
+    // ===== Monthly =====
+    const mnCtx = document.getElementById('monthlyChart');
+    if (mnCtx) {
+        const c = mnCtx.getContext('2d');
+        const g1 = c.createLinearGradient(0, 0, 0, 240);
+        g1.addColorStop(0, 'rgba(124, 58, 237, 0.55)');
+        g1.addColorStop(0.4, 'rgba(124, 58, 237, 0.22)');
+        g1.addColorStop(1, 'rgba(124, 58, 237, 0.02)');
+        const g2 = c.createLinearGradient(0, 0, 0, 240);
+        g2.addColorStop(0, 'rgba(16, 185, 129, 0.50)');
+        g2.addColorStop(0.4, 'rgba(16, 185, 129, 0.20)');
+        g2.addColorStop(1, 'rgba(16, 185, 129, 0.02)');
+
+        new Chart(mnCtx, {
+            type: 'line',
+            data: {
+                labels: D.monthLabels,
+                datasets: [
+                    { label: 'ایجاد شده', data: D.monthCreated, borderColor: '#7c3aed', backgroundColor: g1, borderWidth: 2.5, tension: 0.55, fill: true, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, pointRadius: 4, pointHoverRadius: 7 },
+                    { label: 'تکمیل شده', data: D.monthCompleted, borderColor: '#10b981', backgroundColor: g2, borderWidth: 2.5, tension: 0.55, fill: true, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2, pointRadius: 4, pointHoverRadius: 7 }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { position: 'bottom', labels: { padding: 14, color: '#475569', font: { size: 11, weight: 'bold' }, usePointStyle: true, pointStyle: 'circle', boxWidth: 8 } },
+                    tooltip: TOOLTIP_STYLE,
+                },
+                scales: {
+                    y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0, color: '#64748b', font: { size: 10 } }, grid: GRID_STYLE, border: { display: false } },
+                    x: { grid: { display: false }, border: { display: false }, ticks: { color: '#64748b', font: { size: 10, weight: 'bold' } } }
+                }
+            }
+        });
+    }
+});
+
+// ================== Sidebar ==================
+function toggleSidebar() {
+    const sidebar = document.getElementById('appSidebar');
+    const overlay = document.getElementById('sidebarOverlay');
+    const btn = document.getElementById('hamburgerBtn');
+    if (!sidebar || !overlay || !btn) return;
+    if (sidebar.classList.contains('open')) closeSidebar();
+    else { sidebar.classList.add('open'); overlay.classList.add('active'); btn.classList.add('active'); }
+}
+function closeSidebar() {
+    const sidebar = document.getElementById('appSidebar');
+    const overlay = document.getElementById('sidebarOverlay');
+    const btn = document.getElementById('hamburgerBtn');
+    if (!sidebar || !overlay || !btn) return;
+    sidebar.classList.remove('open'); overlay.classList.remove('active'); btn.classList.remove('active');
+}
+let rz;
+window.addEventListener('resize', function() {
+    clearTimeout(rz);
+    rz = setTimeout(() => { if (window.innerWidth > 900) closeSidebar(); }, 150);
+});
+
+document.addEventListener('contextmenu', function(e) {
+    const t = (e.target.tagName || '').toLowerCase();
+    if (t === 'input' || t === 'textarea') return true;
+    e.preventDefault();
+    return false;
+});
+document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+        const t = (e.target.tagName || '').toLowerCase();
+        if (t !== 'input' && t !== 'textarea') { e.preventDefault(); return false; }
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'u' || e.key === 'U')) { e.preventDefault(); return false; }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'p' || e.key === 'P')) { e.preventDefault(); return false; }
+});
+document.addEventListener('dragstart', function(e) {
+    if (e.target.tagName === 'IMG' || e.target.tagName === 'A') e.preventDefault();
+});
+</script>
+</body>
+</html>
+<?php ob_end_flush(); ?>

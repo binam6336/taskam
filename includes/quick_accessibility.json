@@ -1,0 +1,74 @@
+{
+    "links": [
+        {
+            "id": "dashboard",
+            "title": "داشبورد",
+            "url": "https://mahyarsalehee.ir/tapin/task/",
+            "icon": "fa-gauge-high",
+            "color": "#2563eb"
+        },
+        {
+            "id": "tasks",
+            "title": "وظایف",
+            "url": "https://mahyarsalehee.ir/tapin/task/tasks/?page=list",
+            "icon": "fa-list-check",
+            "color": "#2563eb"
+        },
+        {
+            "id": "subject",
+            "title": "موضوع های وظایف",
+            "url": "https://mahyarsalehee.ir/tapin/task/tasks/?page=subjects",
+            "icon": "fa-tag",
+            "color": "#2563eb"
+        },
+        {
+            "id": "tickets",
+            "title": "تیکت ها",
+            "url": "https://mahyarsalehee.ir/tapin/task/ticket/",
+            "icon": "fa-ticket-simple",
+            "color": "#2563eb"
+        },
+        {
+            "id": "texts",
+            "title": "متن های آماده",
+            "url": "https://mahyarsalehee.ir/tapin/task/texts/",
+            "icon": "fa-message",
+            "color": "#2563eb"
+        },
+        {
+            "id": "call_request",
+            "title": "درخواست تماس",
+            "url": "https://mahyarsalehee.ir/tapin/task/call_requests/",
+            "icon": "fa-bell",
+            "color": "#2563eb"
+        },
+        {
+            "id": "hamkar",
+            "title": "همکاران",
+            "url": "https://mahyarsalehee.ir/tapin/task/colleagues/",
+            "icon": "fa-users",
+            "color": "#2563eb"
+        },
+        {
+            "id": "projects",
+            "title": "پروژه ها",
+            "url": "https://mahyarsalehee.ir/tapin/task/project/",
+            "icon": "fa-code-branch",
+            "color": "#2563eb"
+        },
+        {
+            "id": "chat",
+            "title": "گفتگو ها",
+            "url": "https://mahyarsalehee.ir/tapin/task/chat/",
+            "icon": "fa-comment",
+            "color": "#2563eb"
+        },
+        {
+            "id": "prpfile",
+            "title": "پروفایل",
+            "url": "https://mahyarsalehee.ir/tapin/task/profile/",
+            "icon": "fa-user",
+            "color": "#2563eb"
+        }
+    ]
+}
