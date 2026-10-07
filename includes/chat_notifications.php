@@ -1,8 +1,15 @@
 <?php
 // includes/chat_notifications.php
+// اگر BASE_URL تعریف نشده، خودکار محاسبه کن
 if (!defined('BASE_URL')) {
-    return;
+    $docRoot = rtrim(str_replace('\\', '/', realpath($_SERVER['DOCUMENT_ROOT'] ?? '')), '/');
+    $root    = rtrim(str_replace('\\', '/', realpath(__DIR__ . '/..')), '/');
+    $rel     = ($docRoot && $root && strpos($root, $docRoot) === 0)
+        ? substr($root, strlen($docRoot))
+        : '';
+    define('BASE_URL', $rel);
 }
+
 $u = $_SESSION['user_id'] ?? 0;
 if (!$u) {
     return;

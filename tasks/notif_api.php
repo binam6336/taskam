@@ -1,6 +1,5 @@
 <?php
 // tasks/notif_api.php
-// API سبک برای بررسی وظایف سررسیدشده — سراسری برای همه صفحات
 require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../core/Auth.php';
 require_once __DIR__ . '/../database/Database.php';
@@ -16,39 +15,28 @@ if (!Auth::check()) {
 
 $userId = (int)$_SESSION['user_id'];
 $db = Database::getInstance();
-
 try {
     $db->exec("SET NAMES 'utf8mb4'");
     $db->exec("SET time_zone = '+03:30'");
 } catch (PDOException $e) {
 }
 
-$action = $_GET['action'] ?? $_POST['action'] ?? '';
-
+$action = $_GET['action'] ?? '';
 if ($action !== 'check_due') {
     echo json_encode(['status' => 'error', 'message' => 'action نامعتبر'], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
-/* اطمینان از وجود ستون‌های لازم */
 foreach (
     [
         'due_time'    => "ALTER TABLE tasks ADD COLUMN due_time TIME DEFAULT NULL AFTER due_date",
         'notified_at' => "ALTER TABLE tasks ADD COLUMN notified_at DATETIME DEFAULT NULL AFTER due_time",
         'share_token' => "ALTER TABLE tasks ADD COLUMN share_token VARCHAR(64) DEFAULT NULL",
-    ] as $colName => $alterSql
+    ] as $col => $sql
 ) {
     try {
-        $chk = $db->query("SHOW COLUMNS FROM tasks LIKE " . $db->quote($colName));
-        if ($chk && $chk->rowCount() === 0) {
-            $db->exec($alterSql);
-            if ($colName === 'share_token') {
-                try {
-                    $db->exec("ALTER TABLE tasks ADD UNIQUE INDEX idx_tasks_share_token (share_token)");
-                } catch (PDOException $e) {
-                }
-            }
-        }
+        $chk = $db->query("SHOW COLUMNS FROM tasks LIKE " . $db->quote($col));
+        if ($chk && $chk->rowCount() === 0) $db->exec($sql);
     } catch (PDOException $e) {
     }
 }
@@ -56,14 +44,8 @@ foreach (
 $found = [];
 try {
     $stmt = $db->prepare("
-        SELECT
-            t.id,
-            t.title,
-            t.description,
-            t.due_date,
-            t.due_time,
-            t.share_token,
-            p.title AS project_title
+        SELECT t.id, t.title, t.description, t.due_date, t.due_time, t.share_token,
+               p.title AS project_title
         FROM tasks t
         LEFT JOIN projects p ON t.project_id = p.id
         WHERE t.assignee_id = ?
@@ -84,8 +66,6 @@ try {
         foreach ($rows as $r) {
             $taskId = (int)$r['id'];
             $token  = (string)($r['share_token'] ?? '');
-
-            /* اگر توکن اشتراکی ندارد، تولید کن تا لینک مستقیم کار کند */
             if ($token === '') {
                 $token = bin2hex(random_bytes(16));
                 try {
@@ -94,7 +74,6 @@ try {
                     $token = '';
                 }
             }
-
             try {
                 $updNotif->execute([$taskId]);
             } catch (PDOException $e) {

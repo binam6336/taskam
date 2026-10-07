@@ -9,7 +9,7 @@
     if (window.__GLOBAL_NOTIF_LOADED__) return;
     window.__GLOBAL_NOTIF_LOADED__ = true;
 
-    /* ====================== CONFIG ====================== */
+    /* ============ CONFIG ============ */
     const chatCfg = window.CHAT_NOTIF_CONFIG || {};
     const taskCfg = window.TASK_NOTIF_CONFIG || {};
 
@@ -25,6 +25,8 @@
     const DISMISS_DAYS = 3;
     const CHAT_POLL_MS = 6000;
 
+    console.log('%c[Notif] Loaded. TASK_API =', 'color:#7c3aed;font-weight:bold', TASK_API || '(خالی!)');
+
     const notifiedLatestIds = {};
     let notifInitialized = false;
     let pollInFlight = false;
@@ -35,7 +37,6 @@
     const supported = () => ('Notification' in window);
     const activeChatId = () => Number(window.__chatActiveUserId || 0);
 
-    /* ====================== Dismiss helper ====================== */
     function isDismissedRecently() {
         try {
             const v = localStorage.getItem(DISMISS_KEY);
@@ -49,7 +50,7 @@
         try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch (e) { }
     }
 
-    /* ====================== UI (Modal) ====================== */
+    /* ============ UI Modal ============ */
     function injectUI() {
         if (document.getElementById('__chatNotifModalOverlay')) return;
 
@@ -114,31 +115,18 @@
         document.getElementById('__chatNotifDismissBtn').addEventListener('click', dismissNotifModal);
     }
 
-    function showModal() {
-        injectUI();
-        const el = document.getElementById('__chatNotifModalOverlay');
-        if (el) el.classList.add('active');
-    }
-    function hideModal() {
-        const el = document.getElementById('__chatNotifModalOverlay');
-        if (el) el.classList.remove('active');
-    }
+    function showModal() { injectUI(); const el = document.getElementById('__chatNotifModalOverlay'); if (el) el.classList.add('active'); }
+    function hideModal() { const el = document.getElementById('__chatNotifModalOverlay'); if (el) el.classList.remove('active'); }
     function dismissNotifModal() { hideModal(); markDismissed(); }
 
     function allowNotifications() {
         if (!supported()) { hideModal(); return; }
         const btn = document.getElementById('__chatNotifAllowBtn');
-        if (btn) {
-            btn.disabled = true;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> در حال دریافت مجوز...';
-        }
-
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> در حال دریافت مجوز...'; }
         try {
             const req = Notification.requestPermission(function (perm) { handlePerm(perm, btn); });
             if (req && typeof req.then === 'function') {
-                req.then(function (perm) {
-                    if (typeof perm === 'string') handlePerm(perm, btn);
-                }).catch(function () { handlePerm('denied', btn); });
+                req.then(function (perm) { if (typeof perm === 'string') handlePerm(perm, btn); }).catch(function () { handlePerm('denied', btn); });
             }
         } catch (e) { handlePerm('denied', btn); }
     }
@@ -147,12 +135,7 @@
         const now = Date.now();
         if (now - lastPermTime < 300) return;
         lastPermTime = now;
-
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-bell"></i> بله، اعلان‌ها را فعال کن';
-        }
-
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-bell"></i> بله، اعلان‌ها را فعال کن'; }
         if (perm === 'granted') {
             hideModal();
             try { localStorage.removeItem(DISMISS_KEY); } catch (e) { }
@@ -166,10 +149,9 @@
         }
     }
 
-    /* ====================== Chat notification ====================== */
+    /* ============ Chat notification ============ */
     function showBrowserNotification(item) {
         if (!supported() || Notification.permission !== 'granted') return;
-
         let body = (item.message || '').trim();
         if (!body && item.attachment_name) body = '📎 ' + item.attachment_name;
         if (body.length > 120) body = body.substring(0, 120) + '…';
@@ -180,30 +162,21 @@
             n = new Notification('پیام جدید از ' + item.name, {
                 body, dir: 'rtl', lang: 'fa',
                 icon: 'https://img.icons8.com/color/96/chat.png',
-                badge: 'https://img.icons8.com/color/96/chat.png',
-                tag: 'chat-' + item.sender_id + '-' + item.message_id,
-                data: { senderId: item.sender_id, messageId: item.message_id }
+                tag: 'chat-' + item.sender_id + '-' + item.message_id
             });
         } catch (e) { return; }
 
         n.onclick = function (ev) {
             ev.preventDefault();
             try { window.focus(); } catch (e) { }
-
-            if (activeChatId() === Number(item.sender_id)) {
-                try { n.close(); } catch (e) { }
-                return;
-            }
+            if (activeChatId() === Number(item.sender_id)) { try { n.close(); } catch (e) { } return; }
             try {
                 const url = new URL(CHAT_URL, window.location.href);
                 url.searchParams.set('chat', item.sender_id);
                 window.location.href = url.toString();
-            } catch (e) {
-                window.location.href = CHAT_URL + '?chat=' + item.sender_id;
-            }
+            } catch (e) { window.location.href = CHAT_URL + '?chat=' + item.sender_id; }
             try { n.close(); } catch (e) { }
         };
-
         setTimeout(() => { try { n.close(); } catch (e) { } }, 15000);
     }
 
@@ -211,32 +184,22 @@
         if (!supported() || Notification.permission !== 'granted') return;
         if (pollInFlight) return;
         pollInFlight = true;
-
-        fetch(CHAT_API + '?action=latest_unread', {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin',
-            cache: 'no-store'
-        })
+        fetch(CHAT_API + '?action=latest_unread', { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin', cache: 'no-store' })
             .then(r => r.json())
             .then(data => {
                 if (!data || data.status !== 'success') return;
                 const items = data.items || [];
                 const chatId = activeChatId();
-
                 items.forEach(item => {
                     const sid = Number(item.sender_id);
                     const mid = Number(item.message_id);
                     const prev = notifiedLatestIds[sid];
                     const beingViewed = (chatId === sid) && !document.hidden;
-
                     if (!notifInitialized) { notifiedLatestIds[sid] = mid; return; }
-
                     if (prev === undefined && !beingViewed) showBrowserNotification(item);
                     else if (prev !== undefined && mid > prev && !beingViewed) showBrowserNotification(item);
-
                     notifiedLatestIds[sid] = mid;
                 });
-
                 notifInitialized = true;
             })
             .catch(() => { })
@@ -251,7 +214,7 @@
         chatPollTimer = setInterval(pollLatestUnread, CHAT_POLL_MS);
     }
 
-    /* ====================== Task notification ====================== */
+    /* ============ Task notification ============ */
     function showTaskToast(title) {
         let el = document.getElementById('__globalTaskToast');
         if (!el) {
@@ -290,7 +253,6 @@
         const body = lines.join('\n') || 'زمان انجام این وظیفه رسیده است.';
         const title = 'یادآوری وظیف : ' + task.title;
 
-        /* ساخت URL مقصد */
         let target = TASK_URL || '';
         if (task.share_token) {
             target += (target.indexOf('?') === -1 ? '?' : '&') + 'task=' + encodeURIComponent(task.share_token);
@@ -304,8 +266,7 @@
                 body, dir: 'rtl', lang: 'fa',
                 icon: TASK_ICON, badge: TASK_ICON,
                 tag: 'task-due-' + task.id,
-                requireInteraction: true,
-                data: { taskId: task.id, token: task.share_token || '' }
+                requireInteraction: true
             });
         } catch (e) { return; }
 
@@ -313,16 +274,13 @@
             ev.preventDefault();
             try { window.focus(); } catch (e) { }
             try { n.close(); } catch (e) { }
-            if (target) {
-                try { window.location.href = target; } catch (e) { }
-            }
+            if (target) { try { window.location.href = target; } catch (e) { } }
         };
-
         setTimeout(() => { try { n.close(); } catch (e) { } }, 60000);
     }
 
     function pollTaskReminders() {
-        if (!TASK_API) return;
+        if (!TASK_API) { console.warn('[Notif] TASK_API خالی است — نوتیف وظایف غیرفعال'); return; }
         if (!supported() || Notification.permission !== 'granted') return;
         if (taskPollInFlight) return;
         taskPollInFlight = true;
@@ -336,26 +294,31 @@
             .then(data => {
                 if (!data || data.status !== 'success') return;
                 const tasks = data.tasks || [];
+                if (tasks.length > 0) {
+                    console.log('%c[Notif] وظایف سررسید:', 'color:#7c3aed;font-weight:bold', tasks);
+                }
                 tasks.forEach(function (task) {
                     showTaskBrowserNotification(task);
                     showTaskToast('یادآوری وظیف: ' + task.title);
                 });
             })
-            .catch(() => { })
+            .catch(err => console.warn('[Notif] خطا در check_due:', err))
             .finally(() => { taskPollInFlight = false; });
     }
 
     function startTaskPoller(force) {
         if (taskPollerStarted && !force) return;
-        if (!TASK_API) return;
+        if (!TASK_API) { console.warn('[Notif] startTaskPoller لغو شد: TASK_API خالی است'); return; }
         taskPollerStarted = true;
+        console.log('%c[Notif] Task poller شروع شد، اولین فراخوانی در ' + (TASK_FIRST_DELAY / 1000) + ' ثانیه', 'color:#7c3aed');
         setTimeout(pollTaskReminders, TASK_FIRST_DELAY);
         setInterval(pollTaskReminders, TASK_POLL_MS);
     }
 
-    /* ====================== Init ====================== */
+    /* ============ Init ============ */
     function init() {
-        if (!supported()) return;
+        if (!supported()) { console.warn('[Notif] Notification API پشتیبانی نمی‌شود'); return; }
+        console.log('%c[Notif] Init — permission =', 'color:#7c3aed;font-weight:bold', Notification.permission);
 
         if (Notification.permission === 'default' && !isDismissedRecently()) {
             setTimeout(showModal, 1200);
@@ -363,6 +326,8 @@
         if (Notification.permission === 'granted') {
             startChatPolling();
             startTaskPoller();
+        } else {
+            console.log('[Notif] Permission = ' + Notification.permission + ' — poller شروع نشد');
         }
 
         document.addEventListener('visibilitychange', () => {
@@ -373,13 +338,9 @@
         });
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
 
-    /* ====================== Public API ====================== */
     window.ChatNotifications = {
         setActiveChat: function (uid) { window.__chatActiveUserId = Number(uid) || 0; },
         clearActiveChat: function () { window.__chatActiveUserId = 0; },
