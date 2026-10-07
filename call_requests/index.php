@@ -1,4 +1,10 @@
 <?php
+// ⭐ شروع بافر خروجی — باید قبل از هر require یا خروجی باشد
+// این کار از خطای "headers already sent" در هندلرهای JSON جلوگیری می‌کند
+if (ob_get_level() === 0) {
+    ob_start();
+}
+
 require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../core/Auth.php';
 require_once __DIR__ . '/../database/Database.php';
@@ -141,6 +147,23 @@ if (!function_exists('getCallTaskamBotId')) {
     }
 }
 
+// ⭐ تابع کمکی برای ارسال پاسخ JSON تمیز — قبل از هر header، بافر را خالی می‌کند
+if (!function_exists('sendJsonResponse')) {
+    function sendJsonResponse(array $payload, int $httpCode = 200): void
+    {
+        // پاک‌سازی کامل بافر برای اطمینان از اینکه هیچ warning/notice در پاسخ نیست
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+        if (!headers_sent()) {
+            http_response_code($httpCode);
+            header('Content-Type: application/json; charset=utf-8');
+        }
+        echo json_encode($payload, JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
 $userId = (int)$_SESSION['user_id'];
 $page = 'call_requests';
 $msg = '';
@@ -268,41 +291,34 @@ function checkCallPermission($db, $reqId, $userId, $action)
 
 // ================== Endpoint: دریافت لینک اشتراکی درخواست ==================
 if (isset($_GET['get_call_token'])) {
-    while (ob_get_level() > 0) {
-        ob_end_clean();
-    }
-    header('Content-Type: application/json; charset=utf-8');
-
     $reqId = (int)$_GET['get_call_token'];
     if ($reqId <= 0) {
-        echo json_encode(['status' => 'error', 'message' => 'شناسه نامعتبر'], JSON_UNESCAPED_UNICODE);
-        exit;
+        sendJsonResponse(['status' => 'error', 'message' => 'شناسه نامعتبر'], 400);
     }
 
     $chk = $db->prepare("SELECT id, user_id, assignee_id FROM call_requests WHERE id = ? AND (user_id = ? OR assignee_id = ?) LIMIT 1");
     $chk->execute([$reqId, $userId, $userId]);
     $row = $chk->fetch(PDO::FETCH_ASSOC);
     if (!$row) {
-        echo json_encode(['status' => 'error', 'message' => 'دسترسی به این درخواست ندارید.'], JSON_UNESCAPED_UNICODE);
-        exit;
+        sendJsonResponse(['status' => 'error', 'message' => 'دسترسی به این درخواست ندارید.'], 403);
     }
 
     $token = ensureCallShareToken($db, $reqId);
     if ($token === '') {
-        echo json_encode(['status' => 'error', 'message' => 'خطا در ساخت لینک'], JSON_UNESCAPED_UNICODE);
-        exit;
+        sendJsonResponse(['status' => 'error', 'message' => 'خطا در ساخت لینک'], 500);
     }
 
-    echo json_encode([
+    sendJsonResponse([
         'status' => 'success',
         'token'  => $token,
         'url'    => 'index.php?call=' . $token,
-    ], JSON_UNESCAPED_UNICODE);
-    exit;
+    ]);
 }
 
 // ================== ثبت درخواست تماس جدید ==================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_call_request'])) {
+    $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']);
+
     $firstName = trim($_POST['first_name'] ?? '');
     $lastName  = trim($_POST['last_name'] ?? '');
     $mobile    = trim($_POST['mobile'] ?? '');
@@ -375,16 +391,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_call_request'])) 
 
         $msg = 'درخواست تماس با موفقیت ثبت شد.';
 
-        if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
-            header('Content-Type: application/json; charset=utf-8');
-            echo json_encode(['status' => 'success', 'message' => $msg]);
-            exit;
+        if ($isAjax) {
+            sendJsonResponse(['status' => 'success', 'message' => $msg]);
         }
     } else {
-        if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
-            header('Content-Type: application/json; charset=utf-8');
-            echo json_encode(['status' => 'error', 'message' => 'لطفاً فیلدهای ستاره‌دار را تکمیل کنید.']);
-            exit;
+        if ($isAjax) {
+            sendJsonResponse([
+                'status'  => 'error',
+                'message' => 'لطفاً فیلدهای ستاره‌دار را تکمیل کنید.'
+            ], 422);
         }
         $msg = 'لطفاً فیلدهای ستاره‌دار را تکمیل کنید.';
         $msgType = 'warning';
@@ -393,6 +408,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_call_request'])) 
 
 // ================== ویرایش درخواست ==================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_call_request'])) {
+    $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']);
+
     $reqId = (int)($_POST['request_id'] ?? 0);
     $firstName = trim($_POST['first_name'] ?? '');
     $lastName  = trim($_POST['last_name'] ?? '');
@@ -409,6 +426,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_call_request']
 
     $perm = checkCallPermission($db, $reqId, $userId, 'edit');
     if (!$perm['allowed']) {
+        if ($isAjax) {
+            sendJsonResponse(['status' => 'error', 'message' => 'شما دسترسی ویرایش این درخواست را ندارید.'], 403);
+        }
         $msg = 'شما دسترسی ویرایش این درخواست را ندارید.';
         $msgType = 'danger';
     } else {
@@ -418,6 +438,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_call_request']
         if (!$perm['is_owner'] && $assigneeId !== $oldAssignee) {
             $reassignPerm = checkCallPermission($db, $reqId, $userId, 'reassign');
             if (!$reassignPerm['allowed']) {
+                if ($isAjax) {
+                    sendJsonResponse(['status' => 'error', 'message' => 'شما دسترسی تغییر مسئول این درخواست را ندارید.'], 403);
+                }
                 $msg = 'شما دسترسی تغییر مسئول این درخواست را ندارید.';
                 $msgType = 'danger';
                 $canProceed = false;
@@ -434,7 +457,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_call_request']
                 $stmt->execute([$assigneeId, $firstName, $lastName, $mobile, $email ?: null, $store ?: null, $website ?: null, $description ?: null, $reqId]);
                 ensureCallShareToken($db, $reqId);
                 $msg = 'درخواست با موفقیت ویرایش شد.';
+
+                if ($isAjax) {
+                    sendJsonResponse(['status' => 'success', 'message' => $msg]);
+                }
             } else {
+                if ($isAjax) {
+                    sendJsonResponse([
+                        'status'  => 'error',
+                        'message' => 'لطفاً فیلدهای ستاره‌دار را تکمیل کنید.'
+                    ], 422);
+                }
                 $msg = 'لطفاً فیلدهای ستاره‌دار را تکمیل کنید.';
                 $msgType = 'warning';
             }
@@ -444,21 +477,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_call_request']
 
 // ================== تکمیل درخواست (AJAX) ==================
 if (isset($_GET['complete']) && isset($_GET['id'])) {
-    header('Content-Type: application/json; charset=utf-8');
     $reqId = (int)$_GET['id'];
 
     $perm = checkCallPermission($db, $reqId, $userId, 'complete');
 
     if (!$perm['allowed']) {
-        echo json_encode(['status' => 'error', 'message' => 'شما دسترسی تکمیل این درخواست را ندارید.', 'affected' => 0]);
-        exit;
+        sendJsonResponse(['status' => 'error', 'message' => 'شما دسترسی تکمیل این درخواست را ندارید.', 'affected' => 0], 403);
     }
 
     $stmt = $db->prepare("UPDATE call_requests SET status = 1, completed_at = NOW() WHERE id = ? AND status = 0");
     $stmt->execute([$reqId]);
 
-    echo json_encode(['status' => 'success', 'affected' => $stmt->rowCount()]);
-    exit;
+    sendJsonResponse(['status' => 'success', 'affected' => $stmt->rowCount()]);
 }
 
 // ================== حذف درخواست ==================
@@ -615,14 +645,12 @@ if (!function_exists('renderCallsPagination')) {
 
         $html = '<div class="calls-pagination-inner">';
 
-        // دکمه قبلی (سمت راست در RTL)
         if ($currentPage > 1) {
             $html .= '<a class="pag-btn" href="' . htmlspecialchars($buildLink($currentPage - 1), ENT_QUOTES, 'UTF-8') . '" title="صفحه قبلی"><i class="fas fa-chevron-right"></i></a>';
         } else {
             $html .= '<span class="pag-btn disabled"><i class="fas fa-chevron-right"></i></span>';
         }
 
-        // شماره صفحات
         $pages = [1];
         for ($i = $currentPage - 1; $i <= $currentPage + 1; $i++) {
             if ($i > 1 && $i < $totalPages) $pages[] = $i;
@@ -644,7 +672,6 @@ if (!function_exists('renderCallsPagination')) {
             $prev = $p;
         }
 
-        // دکمه بعدی (سمت چپ در RTL)
         if ($currentPage < $totalPages) {
             $html .= '<a class="pag-btn" href="' . htmlspecialchars($buildLink($currentPage + 1), ENT_QUOTES, 'UTF-8') . '" title="صفحه بعدی"><i class="fas fa-chevron-left"></i></a>';
         } else {
