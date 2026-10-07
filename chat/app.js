@@ -1,3 +1,7 @@
+/* ======================================================
+   CHAT — app.js (Scroll-Optimized)
+   ====================================================== */
+
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = ['png', 'jpg', 'jpeg', 'pdf', 'zip', 'txt'];
 const FILE_BASE_URL = '../uploads/chat_files/';
@@ -23,6 +27,55 @@ let loadingOlder = false;
 let isAtBottom = true;
 let pendingHighlightMsgId = null;
 
+/* ⚡ Performance flags */
+let _fetchInFlight = false;
+let _initialLoadAC = null;
+let _scrollRaf = 0;
+let _tabVisible = !document.hidden;
+
+/* ⚡ Scroll state — برای غیرفعال کردن انیمیشن‌ها هنگام اسکرول */
+let _isScrolling = false;
+let _scrollEndTimer = null;
+let _pendingMessages = null; // پیام‌هایی که در حین اسکرول رسیدن و باید بعد از توقف اضافه شن
+
+/* ⚡ Cache NodeList — جلوگیری از querySelectorAll تکراری */
+let _chatItemsCache = null;
+let _chatItemsCacheTime = 0;
+function getChatItems() {
+    const now = Date.now();
+    if (!_chatItemsCache || now - _chatItemsCacheTime > 3000) {
+        _chatItemsCache = document.querySelectorAll('.chat-item');
+        _chatItemsCacheTime = now;
+    }
+    return _chatItemsCache;
+}
+function invalidateChatItemsCache() {
+    _chatItemsCache = null;
+    _chatItemsCacheTime = 0;
+}
+
+/* ⚡ IntersectionObserver برای tracking چت‌های دیده‌شده */
+const _visibleChatIds = new Set();
+let _chatItemObserver = null;
+function initChatItemObserver() {
+    if (_chatItemObserver) _chatItemObserver.disconnect();
+    const listEl = document.getElementById('chatListContainer');
+    if (!listEl) return;
+
+    _chatItemObserver = new IntersectionObserver((entries) => {
+        for (let i = 0; i < entries.length; i++) {
+            const entry = entries[i];
+            const uid = entry.target.getAttribute('data-user-id');
+            if (!uid) continue;
+            if (entry.isIntersecting) _visibleChatIds.add(uid);
+            else _visibleChatIds.delete(uid);
+        }
+    }, { root: listEl, rootMargin: '80px' });
+
+    const items = listEl.querySelectorAll('.chat-item');
+    for (let i = 0; i < items.length; i++) _chatItemObserver.observe(items[i]);
+}
+
 // Lightbox
 let lightboxZoom = 1;
 const ZOOM_MIN = 0.25, ZOOM_MAX = 5, ZOOM_STEP = 0.25;
@@ -42,12 +95,40 @@ let searchAbortController = null;
 let lastSearchResults = [];
 let searchInputTouched = false;
 
+/* ⚡ Cache DOM refs */
+const $cache = Object.create(null);
+function $id(id) {
+    return $cache[id] || ($cache[id] = document.getElementById(id));
+}
+
+/* ⚡ Cache escapeHtml */
+const _escapeCache = new Map();
+const _ESC_MAX = 500;
+
+/* ⚡ Cache formatDayLabel */
+const _dayLabelCache = new Map();
+
+/* ⚡ rIC helper */
+function whenIdle(fn) {
+    if ('requestIdleCallback' in window) {
+        requestIdleCallback(fn, { timeout: 2000 });
+    } else {
+        setTimeout(fn, 1);
+    }
+}
+
+/* ======================================================
+   TIME HELPERS
+   ====================================================== */
 function parseServerTime(s) {
     if (!s) return 0;
     const ts = Date.parse(String(s).replace(' ', 'T'));
     return isNaN(ts) ? 0 : ts;
 }
 
+/* ======================================================
+   MESSAGE PERMISSIONS & CONTEXT MENU
+   ====================================================== */
 function checkMessagePermissions(el) {
     const senderId = parseInt(el.getAttribute('data-sender-id'), 10);
     const createdMs = parseInt(el.getAttribute('data-created-ms'), 10);
@@ -110,14 +191,14 @@ function openContextMenu(e, bubbleEl) {
     contextMenuMsgData = extractMessageDataFromBubble(bubbleEl);
     document.querySelectorAll('.chat-bubble.context-active').forEach(el => el.classList.remove('context-active'));
     bubbleEl.classList.add('context-active');
-    const menu = document.getElementById('msgContextMenu');
-    document.getElementById('ctxDownloadBtn').style.display = perm.hasFile ? 'flex' : 'none';
+    const menu = $id('msgContextMenu');
+    $id('ctxDownloadBtn').style.display = perm.hasFile ? 'flex' : 'none';
     const showEdit = perm.isMine && perm.hasText && !perm.hasFile && perm.isWithinWindow;
-    document.getElementById('ctxEditBtn').style.display = showEdit ? 'flex' : 'none';
-    document.getElementById('ctxEditDivider').style.display = showEdit ? 'block' : 'none';
+    $id('ctxEditBtn').style.display = showEdit ? 'flex' : 'none';
+    $id('ctxEditDivider').style.display = showEdit ? 'block' : 'none';
     const showDelete = perm.isMine && perm.isWithinWindow;
-    document.getElementById('ctxDeleteBtn').style.display = showDelete ? 'flex' : 'none';
-    document.getElementById('ctxDeleteDivider').style.display = showDelete ? 'block' : 'none';
+    $id('ctxDeleteBtn').style.display = showDelete ? 'flex' : 'none';
+    $id('ctxDeleteDivider').style.display = showDelete ? 'block' : 'none';
     if (!perm.hasText && !perm.hasFile && !showEdit && !showDelete) {
         bubbleEl.classList.remove('context-active'); return;
     }
@@ -136,7 +217,8 @@ function openContextMenu(e, bubbleEl) {
 }
 
 function closeContextMenu() {
-    document.getElementById('msgContextMenu').classList.remove('active');
+    const m = $id('msgContextMenu');
+    if (m && m.classList.contains('active')) m.classList.remove('active');
     document.querySelectorAll('.chat-bubble.context-active').forEach(el => el.classList.remove('context-active'));
     contextMenuMsgData = null;
 }
@@ -186,19 +268,19 @@ function downloadAttachment(url, name) {
 
 function openDeleteModal(msgId) {
     pendingDeleteMsgId = msgId;
-    document.getElementById('deleteModal').classList.add('active');
-    const btn = document.getElementById('confirmDeleteBtn');
+    $id('deleteModal').classList.add('active');
+    const btn = $id('confirmDeleteBtn');
     btn.disabled = false;
     btn.innerHTML = '<i class="fas fa-trash-alt"></i> بله، حذف کن';
 }
 function closeDeleteModal() {
-    document.getElementById('deleteModal').classList.remove('active');
+    $id('deleteModal').classList.remove('active');
     pendingDeleteMsgId = null;
 }
 
 function confirmDeleteMessage() {
     if (!pendingDeleteMsgId) return;
-    const btn = document.getElementById('confirmDeleteBtn');
+    const btn = $id('confirmDeleteBtn');
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> در حال حذف...';
     const fd = new FormData();
@@ -210,9 +292,8 @@ function confirmDeleteMessage() {
             if (data.status === 'success') {
                 const b = document.querySelector(`.chat-bubble[data-msg-id="${pendingDeleteMsgId}"]`);
                 if (b) {
-                    b.style.transition = 'all 0.3s ease';
+                    b.style.transition = 'opacity 0.3s ease';
                     b.style.opacity = '0';
-                    b.style.transform = 'translateX(-30px) scale(0.9)';
                     setTimeout(() => b.remove(), 300);
                 }
                 loadedMessageIds.delete(Number(pendingDeleteMsgId));
@@ -234,27 +315,27 @@ function confirmDeleteMessage() {
 
 function openEditModal(data) {
     editingMsgId = data.id;
-    document.getElementById('editMessageTextarea').value = data.message || '';
-    document.getElementById('editModal').classList.add('active');
+    $id('editMessageTextarea').value = data.message || '';
+    $id('editModal').classList.add('active');
     setTimeout(() => {
-        const ta = document.getElementById('editMessageTextarea');
+        const ta = $id('editMessageTextarea');
         ta.focus();
         ta.setSelectionRange(ta.value.length, ta.value.length);
     }, 200);
-    const btn = document.getElementById('confirmEditBtn');
+    const btn = $id('confirmEditBtn');
     btn.disabled = false;
     btn.innerHTML = '<i class="fas fa-check"></i> ذخیره تغییرات';
 }
 function closeEditModal() {
-    document.getElementById('editModal').classList.remove('active');
+    $id('editModal').classList.remove('active');
     editingMsgId = null;
 }
 
 function confirmEditMessage() {
     if (!editingMsgId) return;
-    const newText = document.getElementById('editMessageTextarea').value.trim();
+    const newText = $id('editMessageTextarea').value.trim();
     if (!newText) { showToast('متن پیام نمی‌تواند خالی باشد', 'error'); return; }
-    const btn = document.getElementById('confirmEditBtn');
+    const btn = $id('confirmEditBtn');
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> در حال ذخیره...';
     const fd = new FormData();
@@ -305,8 +386,8 @@ function updateBubbleText(msgId, newText) {
 
 let toastTimer = null;
 function showToast(text, type = 'success') {
-    const toast = document.getElementById('chatToast');
-    document.getElementById('chatToastText').textContent = text;
+    const toast = $id('chatToast');
+    $id('chatToastText').textContent = text;
     const icon = toast.querySelector('i');
     icon.className = 'fas';
     toast.classList.remove('chat-toast--success', 'chat-toast--error', 'chat-toast--info');
@@ -324,7 +405,8 @@ function showToast(text, type = 'success') {
 function openChat(userId, element) {
     if (currentChatUserId === userId && !pendingHighlightMsgId) return;
 
-    // ⭐ اطلاع به سیستم نوتیف سراسری
+    if (_initialLoadAC) { try { _initialLoadAC.abort(); } catch (e) { } _initialLoadAC = null; }
+
     if (window.ChatNotifications) window.ChatNotifications.setActiveChat(userId);
 
     const isSaved = element && element.getAttribute('data-is-saved') === '1';
@@ -339,6 +421,8 @@ function openChat(userId, element) {
     hasMoreBefore = false;
     hasMoreAfter = false;
     loadingOlder = false;
+    _fetchInFlight = false;
+    _pendingMessages = null;
 
     document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
     if (element) element.classList.add('active');
@@ -350,11 +434,11 @@ function openChat(userId, element) {
     } : (CHAT_LIST.find(c => Number(c.user_id) === Number(userId)) || { name: '', initial: '?', avatar_url: null });
     if (!element) currentIsSaved = !!person.is_saved;
 
-    document.getElementById('chatHeaderName').textContent = person.name;
-    const headerAvatar = document.getElementById('chatHeaderAvatar');
-    const headerStatus = document.getElementById('chatHeaderStatus');
-    const headerStatusText = document.getElementById('chatHeaderStatusText');
-    const chatInputEl = document.getElementById('chatInput');
+    $id('chatHeaderName').textContent = person.name;
+    const headerAvatar = $id('chatHeaderAvatar');
+    const headerStatus = $id('chatHeaderStatus');
+    const headerStatusText = $id('chatHeaderStatusText');
+    const chatInputEl = $id('chatInput');
 
     headerAvatar.classList.remove('is-saved-avatar', 'is-bot-avatar', 'online', 'offline');
 
@@ -376,11 +460,11 @@ function openChat(userId, element) {
         chatInputEl.placeholder = 'پیام خود را بنویسید...';
     }
 
-    document.getElementById('chatEmptyState').style.display = 'none';
-    document.getElementById('chatActiveArea').style.display = 'flex';
-    document.getElementById('chatBody').innerHTML = '';
+    $id('chatEmptyState').style.display = 'none';
+    $id('chatActiveArea').style.display = 'flex';
+    $id('chatBody').innerHTML = '';
 
-    const container = document.getElementById('chatContainer');
+    const container = $id('chatContainer');
     if (container) container.classList.add('chat-open');
 
     const badge = document.querySelector(`.chat-item__badge[data-user-id="${userId}"]`);
@@ -406,18 +490,57 @@ function openChat(userId, element) {
 }
 
 function closeChatOnMobile() {
-    // ⭐ اطلاع به سیستم نوتیف سراسری که دیگه چتی باز نیست
     if (window.ChatNotifications) window.ChatNotifications.clearActiveChat();
 
-    const c = document.getElementById('chatContainer');
+    const c = $id('chatContainer');
     if (c) c.classList.remove('chat-open');
+    if (_initialLoadAC) { try { _initialLoadAC.abort(); } catch (e) { } _initialLoadAC = null; }
     currentChatUserId = null;
     currentIsSaved = false;
     currentIsBot = false;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+    _pendingMessages = null;
     clearFilePreview();
     closeContextMenu();
+}
+
+/* ======================================================
+   ⚡ CHUNKED RENDERING — جلوگیری از freeze اولیه
+   ====================================================== */
+function renderMessagesChunked(body, messages, onComplete) {
+    const CHUNK_SIZE = 20;
+    let index = 0;
+    let lastDay = null;
+
+    function renderChunk() {
+        const frag = document.createDocumentFragment();
+        const end = Math.min(index + CHUNK_SIZE, messages.length);
+        for (; index < end; index++) {
+            const msg = messages[index];
+            const createdMs = parseServerTime(msg.created_at);
+            const dateObj = createdMs ? new Date(createdMs) : new Date();
+            const dayLabel = formatDayLabel(dateObj);
+            if (lastDay !== dayLabel) {
+                const d = document.createElement('div');
+                d.className = 'chat-day';
+                d.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
+                frag.appendChild(d);
+                lastDay = dayLabel;
+            }
+            frag.appendChild(createMessageElement(msg, true));
+            loadedMessageIds.add(Number(msg.id));
+        }
+        body.appendChild(frag);
+        lastRenderedDay = lastDay;
+
+        if (index < messages.length) {
+            requestAnimationFrame(renderChunk);
+        } else if (onComplete) {
+            onComplete();
+        }
+    }
+    renderChunk();
 }
 
 /* ======================================================
@@ -425,10 +548,15 @@ function closeChatOnMobile() {
    ====================================================== */
 function loadInitialMessages() {
     if (!currentChatUserId) return;
-    const body = document.getElementById('chatBody');
+    const body = $id('chatBody');
     body.innerHTML = '<div class="chat-load-more loading" id="loadMoreEl"><span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span></div>';
 
-    fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=initial&limit=${PAGE_SIZE}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    _initialLoadAC = new AbortController();
+
+    fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=initial&limit=${PAGE_SIZE}`, {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        signal: _initialLoadAC.signal
+    })
         .then(r => r.json())
         .then(data => {
             if (data.status !== 'success') { showToast('خطا در دریافت پیام‌ها', 'error'); return; }
@@ -456,28 +584,26 @@ function loadInitialMessages() {
             loader.innerHTML = '<span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span>';
             body.appendChild(loader);
 
-            messages.forEach(msg => {
-                appendMessage(msg);
-                loadedMessageIds.add(Number(msg.id));
+            // ⚡ رندر چانکی — صفحه اول قفل نمی‌شود
+            renderMessagesChunked(body, messages, () => {
+                if (messages.length > 0) {
+                    firstLoadedMsgId = Number(messages[0].id);
+                    lastLoadedMsgId = Number(messages[messages.length - 1].id);
+                }
+                updateLoadMoreUI();
+                requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
             });
-
-            if (messages.length > 0) {
-                firstLoadedMsgId = Number(messages[0].id);
-                lastLoadedMsgId = Number(messages[messages.length - 1].id);
-            }
-
-            updateLoadMoreUI();
-            requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
         })
-        .catch(() => showToast('خطا در ارتباط با سرور', 'error'));
+        .catch(err => { if (err.name !== 'AbortError') showToast('خطا در ارتباط با سرور', 'error'); })
+        .finally(() => { _initialLoadAC = null; });
 }
 
 function loadOlderMessages() {
     if (!currentChatUserId || loadingOlder || !hasMoreBefore || firstLoadedMsgId <= 0) return;
     loadingOlder = true;
 
-    const body = document.getElementById('chatBody');
-    const loader = document.getElementById('loadMoreEl');
+    const body = $id('chatBody');
+    const loader = $id('loadMoreEl');
     if (loader) loader.classList.add('loading');
 
     const prevScrollHeight = body.scrollHeight;
@@ -497,16 +623,17 @@ function loadOlderMessages() {
 
             firstLoadedMsgId = Number(messages[0].id);
 
-            const frag = buildMessagesFragment(messages);
+            const frag = buildMessagesFragment(messages, true);
             messages.forEach(m => loadedMessageIds.add(Number(m.id)));
 
-            const loaderEl = document.getElementById('loadMoreEl');
+            const loaderEl = $id('loadMoreEl');
             if (loaderEl) {
                 loaderEl.insertAdjacentElement('afterend', frag);
             } else {
                 body.insertBefore(frag, body.firstChild);
             }
 
+            // ⚡ حفظ موقعیت اسکرول بدون layout thrashing
             requestAnimationFrame(() => {
                 const newScrollHeight = body.scrollHeight;
                 body.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
@@ -519,7 +646,7 @@ function loadOlderMessages() {
 }
 
 function loadMessagesAround(targetId) {
-    const body = document.getElementById('chatBody');
+    const body = $id('chatBody');
     body.innerHTML = '<div class="chat-load-more loading"><span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span></div>';
 
     fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=around&target_id=${targetId}&limit=${PAGE_SIZE}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
@@ -539,32 +666,36 @@ function loadMessagesAround(targetId) {
             loader.innerHTML = '<span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span>';
             body.appendChild(loader);
 
-            messages.forEach(msg => {
-                appendMessage(msg);
-                loadedMessageIds.add(Number(msg.id));
-            });
-            if (messages.length > 0) {
-                firstLoadedMsgId = Number(messages[0].id);
-                lastLoadedMsgId = Number(messages[messages.length - 1].id);
-            }
-
-            updateLoadMoreUI();
-
-            setTimeout(() => {
-                const target = document.querySelector(`.chat-bubble[data-msg-id="${targetId}"]`);
-                if (target) {
-                    target.scrollIntoView({ block: 'center', behavior: 'auto' });
-                    target.classList.add('search-highlight');
-                    setTimeout(() => target.classList.remove('search-highlight'), 2400);
+            renderMessagesChunked(body, messages, () => {
+                if (messages.length > 0) {
+                    firstLoadedMsgId = Number(messages[0].id);
+                    lastLoadedMsgId = Number(messages[messages.length - 1].id);
                 }
-            }, 150);
+                updateLoadMoreUI();
+
+                requestAnimationFrame(() => {
+                    const target = document.querySelector(`.chat-bubble[data-msg-id="${targetId}"]`);
+                    if (target) {
+                        target.scrollIntoView({ block: 'center', behavior: 'auto' });
+                        target.classList.add('search-highlight');
+                        setTimeout(() => target.classList.remove('search-highlight'), 2400);
+                    }
+                });
+            });
         })
         .catch(() => { });
 }
 
+/* ======================================================
+   ⚡ POLL NEW MESSAGES — با محافظت از اسکرول
+   ====================================================== */
 function pollNewMessages() {
     if (!currentChatUserId) return;
     if (lastLoadedMsgId <= 0) return;
+    if (_fetchInFlight) return;
+    if (!_tabVisible) return;
+
+    _fetchInFlight = true;
     fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=newer&after_id=${lastLoadedMsgId}&limit=50`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
         .then(r => r.json())
         .then(data => {
@@ -572,30 +703,68 @@ function pollNewMessages() {
             const messages = data.messages || [];
             if (messages.length === 0) return;
 
-            const body = document.getElementById('chatBody');
+            const body = $id('chatBody');
             isAtBottom = (body.scrollHeight - body.scrollTop - body.clientHeight) < 80;
 
-            let hasNewFromMe = false;
-            messages.forEach(msg => {
-                const msgId = Number(msg.id);
-                if (!loadedMessageIds.has(msgId)) {
-                    appendMessage(msg);
-                    loadedMessageIds.add(msgId);
-                    if (Number(msg.sender_id) === CURRENT_USER_ID) hasNewFromMe = true;
-                } else {
-                    updateMessageReadStatus(msgId, Number(msg.is_read));
-                    updateMessageTextIfEdited(msgId, msg);
-                }
-            });
-            lastLoadedMsgId = Math.max(lastLoadedMsgId, Number(messages[messages.length - 1].id));
+            // ⚡ اگر کاربر در حال اسکروله، پیام‌های جدید را در صف نگه می‌داریم
+            // تا بعد از توقف اسکرول، بدون jank اضافه شن
+            if (_isScrolling && !messages.some(m => Number(m.sender_id) === CURRENT_USER_ID)) {
+                if (!_pendingMessages) _pendingMessages = [];
+                _pendingMessages.push(...messages);
+                lastLoadedMsgId = Math.max(lastLoadedMsgId, Number(messages[messages.length - 1].id));
+                return;
+            }
 
-            if (isAtBottom || hasNewFromMe) requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
+            applyNewMessages(body, messages, isAtBottom);
         })
-        .catch(() => { });
+        .catch(() => { })
+        .finally(() => { _fetchInFlight = false; });
+}
+
+/* ⚡ اعمال پیام‌های جدید به‌صورت batch */
+function applyNewMessages(body, messages, shouldScroll) {
+    let lastDay = lastRenderedDay;
+    const frag = document.createDocumentFragment();
+    let addedAny = false;
+    let hasNewFromMe = false;
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        const msgId = Number(msg.id);
+        if (!loadedMessageIds.has(msgId)) {
+            const createdMs = parseServerTime(msg.created_at);
+            const dateObj = createdMs ? new Date(createdMs) : new Date();
+            const dayLabel = formatDayLabel(dateObj);
+            if (lastDay !== dayLabel) {
+                const d = document.createElement('div');
+                d.className = 'chat-day';
+                d.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
+                frag.appendChild(d);
+                lastDay = dayLabel;
+            }
+            // ⚡ بدون انیمیشن اگر در حال اسکرول هستیم
+            frag.appendChild(createMessageElement(msg, _isScrolling));
+            loadedMessageIds.add(msgId);
+            addedAny = true;
+            if (Number(msg.sender_id) === CURRENT_USER_ID) hasNewFromMe = true;
+        } else {
+            updateMessageReadStatus(msgId, Number(msg.is_read));
+            updateMessageTextIfEdited(msgId, msg);
+        }
+    }
+    if (addedAny) {
+        body.appendChild(frag);
+        lastRenderedDay = lastDay;
+    }
+    lastLoadedMsgId = Math.max(lastLoadedMsgId, Number(messages[messages.length - 1].id));
+
+    if ((shouldScroll || hasNewFromMe) && addedAny) {
+        requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
+    }
 }
 
 function updateLoadMoreUI() {
-    const loader = document.getElementById('loadMoreEl');
+    const loader = $id('loadMoreEl');
     if (!loader) return;
     loader.classList.remove('loading');
     if (!hasMoreBefore) {
@@ -661,10 +830,10 @@ function handleFileSelect(input) {
     if (f.size > MAX_FILE_SIZE) { alert('حجم فایل نباید بیشتر از ۵۰ مگابایت باشد.'); input.value = ''; clearFilePreview(); return; }
     if (!ALLOWED_EXTENSIONS.includes(ext)) { alert('فرمت فایل مجاز نیست.\nفرمت‌های مجاز: PNG, JPG, PDF, ZIP, TXT'); input.value = ''; clearFilePreview(); return; }
     selectedFile = f;
-    const preview = document.getElementById('filePreview');
-    const iconEl = document.getElementById('filePreviewIcon');
-    const nameEl = document.getElementById('filePreviewName');
-    const sizeEl = document.getElementById('filePreviewSize');
+    const preview = $id('filePreview');
+    const iconEl = $id('filePreviewIcon');
+    const nameEl = $id('filePreviewName');
+    const sizeEl = $id('filePreviewSize');
     iconEl.className = 'file-preview__icon';
     if (ext === 'pdf') iconEl.classList.add('type-pdf');
     else if (ext === 'zip') iconEl.classList.add('type-zip');
@@ -674,24 +843,25 @@ function handleFileSelect(input) {
     nameEl.textContent = f.name;
     sizeEl.textContent = formatFileSize(f.size);
     preview.classList.add('active');
-    setTimeout(() => document.getElementById('chatInput').focus(), 100);
+    setTimeout(() => $id('chatInput').focus(), 100);
 }
 
 function clearFilePreview() {
     selectedFile = null;
-    document.getElementById('fileInput').value = '';
-    document.getElementById('filePreview').classList.remove('active');
+    $id('fileInput').value = '';
+    $id('filePreview').classList.remove('active');
 }
 
 function updateUploadProgress(p) {
-    const w = document.getElementById('uploadProgress');
-    const b = document.getElementById('uploadProgressBar');
+    const w = $id('uploadProgress');
+    const b = $id('uploadProgressBar');
     if (p > 0 && p < 100) { w.classList.add('active'); b.style.width = p + '%'; }
     else if (p >= 100) { b.style.width = '100%'; setTimeout(() => { w.classList.remove('active'); b.style.width = '0%'; }, 300); }
     else { w.classList.remove('active'); b.style.width = '0%'; }
 }
 
-function createMessageElement(msg) {
+/* ⚡ createMessageElement با پارامتر skipAnimation */
+function createMessageElement(msg, skipAnimation) {
     const senderIdNum = Number(msg.sender_id);
     const isSent = senderIdNum === CURRENT_USER_ID;
     let cls;
@@ -771,7 +941,7 @@ function createMessageElement(msg) {
         const fileSize = formatFileSize(msg.attachment_size || 0);
         const icon = getFileIcon(ext);
         if (['png', 'jpg', 'jpeg'].includes(ext)) {
-            contentHtml += `<div class="chat-bubble__attachment"><div class="chat-image-wrapper" onclick="event.stopPropagation();openLightbox('${escapeHtml(fileUrl)}','${escapeHtml(fileName)}')"><img src="${escapeHtml(fileUrl)}" alt="${escapeHtml(fileName)}" class="chat-image-preview"><div class="image-zoom-hint"><i class="fas fa-expand"></i></div></div></div>`;
+            contentHtml += `<div class="chat-bubble__attachment"><div class="chat-image-wrapper" onclick="event.stopPropagation();openLightbox('${escapeHtml(fileUrl)}','${escapeHtml(fileName)}')"><img src="${escapeHtml(fileUrl)}" alt="${escapeHtml(fileName)}" class="chat-image-preview" loading="lazy" decoding="async"><div class="image-zoom-hint"><i class="fas fa-expand"></i></div></div></div>`;
         } else {
             contentHtml += `<div class="chat-bubble__attachment"><a href="${escapeHtml(fileUrl)}" class="chat-file-card" download="${escapeHtml(fileName)}" target="_blank" onclick="event.stopPropagation();"><div class="chat-file-card__icon type-${ext}"><i class="fas ${icon}"></i></div><div class="chat-file-card__info"><div class="chat-file-card__name">${escapeHtml(fileName)}</div><div class="chat-file-card__size"><i class="fas fa-download"></i> ${escapeHtml(fileSize)}</div></div></a></div>`;
         }
@@ -781,6 +951,8 @@ function createMessageElement(msg) {
 
     const bubble = document.createElement('div');
     let clsExtra = isTaskNotification ? ' task-notification' : '';
+    // ⚡ اگر skipAnimation باشد، انیمیشن را حذف می‌کنیم (huge scroll improvement)
+    if (skipAnimation) clsExtra += ' no-anim';
     bubble.className = 'chat-bubble ' + cls + clsExtra;
     bubble.setAttribute('data-msg-id', String(msg.id));
     bubble.setAttribute('data-created-ms', String(createdMs || Date.now()));
@@ -798,10 +970,11 @@ function createMessageElement(msg) {
     return bubble;
 }
 
-function buildMessagesFragment(messages) {
+function buildMessagesFragment(messages, skipAnimation) {
     const frag = document.createDocumentFragment();
     let lastDay = null;
-    messages.forEach(msg => {
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
         const createdMs = parseServerTime(msg.created_at);
         const dateObj = createdMs ? new Date(createdMs) : new Date();
         const dayLabel = formatDayLabel(dateObj);
@@ -812,13 +985,13 @@ function buildMessagesFragment(messages) {
             frag.appendChild(d);
             lastDay = dayLabel;
         }
-        frag.appendChild(createMessageElement(msg));
-    });
+        frag.appendChild(createMessageElement(msg, skipAnimation));
+    }
     return frag;
 }
 
 function appendMessage(msg) {
-    const body = document.getElementById('chatBody');
+    const body = $id('chatBody');
     const createdMs = parseServerTime(msg.created_at);
     const dateObj = createdMs ? new Date(createdMs) : new Date();
     const dayLabel = formatDayLabel(dateObj);
@@ -829,28 +1002,45 @@ function appendMessage(msg) {
         body.appendChild(d);
         lastRenderedDay = dayLabel;
     }
-    body.appendChild(createMessageElement(msg));
+    body.appendChild(createMessageElement(msg, _isScrolling));
 }
 
 function formatTime(d) {
     return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
+
 function formatDayLabel(d) {
+    const key = d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+    const cached = _dayLabelCache.get(key);
+    if (cached) return cached;
+
     const t = new Date(), y = new Date();
     y.setDate(t.getDate() - 1);
     const s = d.toDateString();
-    if (s === t.toDateString()) return 'امروز';
-    if (s === y.toDateString()) return 'دیروز';
-    const m = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
-    return d.getDate() + ' ' + m[d.getMonth()] + ' ' + d.getFullYear();
+    let result;
+    if (s === t.toDateString()) result = 'امروز';
+    else if (s === y.toDateString()) result = 'دیروز';
+    else {
+        const m = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
+        result = d.getDate() + ' ' + m[d.getMonth()] + ' ' + d.getFullYear();
+    }
+    if (_dayLabelCache.size > 200) _dayLabelCache.clear();
+    _dayLabelCache.set(key, result);
+    return result;
 }
 
 function sendHeartbeat() {
-    fetch('api.php?action=heartbeat', { headers: { 'X-Requested-With': 'XMLHttpRequest' } }).catch(() => { });
+    if (!_tabVisible) return;
+    fetch('api.php?action=heartbeat', {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        keepalive: true
+    }).catch(() => { });
 }
+
 function fetchUserStatus() {
     if (!currentChatUserId || currentIsSaved || currentIsBot) return;
     if (statusRequestInFlight) return;
+    if (!_tabVisible) return;
     statusRequestInFlight = true;
     fetch('api.php?action=user_status&user_id=' + currentChatUserId, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
         .then(r => r.json())
@@ -863,9 +1053,9 @@ function updateStatusUI(targetUserId, isOnline, lastSeenTs, lastSeenText) {
     if (currentIsSaved && Number(targetUserId) === Number(CURRENT_USER_ID)) return;
     if (currentChatUserId && Number(currentChatUserId) === Number(targetUserId)) {
         if (currentIsBot) return;
-        const s = document.getElementById('chatHeaderStatus');
-        const t = document.getElementById('chatHeaderStatusText');
-        const a = document.getElementById('chatHeaderAvatar');
+        const s = $id('chatHeaderStatus');
+        const t = $id('chatHeaderStatusText');
+        const a = $id('chatHeaderAvatar');
         s.classList.remove('saved', 'bot');
         if (isOnline) {
             s.classList.remove('offline'); s.classList.add('online');
@@ -884,15 +1074,16 @@ function updateStatusUI(targetUserId, isOnline, lastSeenTs, lastSeenText) {
     }
 }
 
+/* ⚡ بهینه‌شده: استفاده از IntersectionObserver cache به‌جای getBoundingClientRect */
 function fetchAllUsersStatus() {
-    const items = document.querySelectorAll('.chat-item');
+    if (!_tabVisible) return;
+
     const ids = [];
-    items.forEach(item => {
-        if (item.getAttribute('data-is-saved') === '1') return;
-        if (item.getAttribute('data-is-bot') === '1') return;
-        const uid = item.getAttribute('data-user-id');
+    // ⚡ فقط چت‌های دیده‌شده (با IntersectionObserver track شدن)
+    _visibleChatIds.forEach(uid => {
         if (uid && Number(uid) !== currentChatUserId) ids.push(Number(uid));
     });
+
     if (ids.length === 0) return;
     fetch('api.php?action=users_status&user_ids=' + ids.join(','), { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
         .then(r => r.json())
@@ -908,11 +1099,11 @@ function fetchAllUsersStatus() {
 
 function sendFileWithMessage() {
     if (!currentChatUserId || !selectedFile || sendingMessage) return;
-    const inputEl = document.getElementById('chatInput');
+    const inputEl = $id('chatInput');
     const text = inputEl.value.trim();
     sendingMessage = true;
-    document.getElementById('chatSendBtn').disabled = true;
-    document.getElementById('attachBtn').disabled = true;
+    $id('chatSendBtn').disabled = true;
+    $id('attachBtn').disabled = true;
     const fd = new FormData();
     fd.append('action', 'send_file');
     fd.append('receiver_id', currentChatUserId);
@@ -925,8 +1116,8 @@ function sendFileWithMessage() {
     xhr.addEventListener('load', () => {
         updateUploadProgress(100);
         sendingMessage = false;
-        document.getElementById('chatSendBtn').disabled = false;
-        document.getElementById('attachBtn').disabled = false;
+        $id('chatSendBtn').disabled = false;
+        $id('attachBtn').disabled = false;
         try {
             const data = JSON.parse(xhr.responseText);
             if (data.status === 'success') {
@@ -939,8 +1130,8 @@ function sendFileWithMessage() {
     xhr.addEventListener('error', () => {
         updateUploadProgress(0);
         sendingMessage = false;
-        document.getElementById('chatSendBtn').disabled = false;
-        document.getElementById('attachBtn').disabled = false;
+        $id('chatSendBtn').disabled = false;
+        $id('attachBtn').disabled = false;
         alert('خطا در ارتباط با سرور');
     });
     xhr.open('POST', 'api.php');
@@ -956,11 +1147,11 @@ function sendMessage(e) {
         return;
     }
     if (selectedFile) { sendFileWithMessage(); return; }
-    const inputEl = document.getElementById('chatInput');
+    const inputEl = $id('chatInput');
     const text = inputEl.value.trim();
     if (!text) return;
     sendingMessage = true;
-    document.getElementById('chatSendBtn').disabled = true;
+    $id('chatSendBtn').disabled = true;
     const fd = new FormData();
     fd.append('action', 'send');
     fd.append('receiver_id', currentChatUserId);
@@ -977,50 +1168,86 @@ function sendMessage(e) {
         .catch(() => alert('خطا در ارتباط با سرور'))
         .finally(() => {
             sendingMessage = false;
-            document.getElementById('chatSendBtn').disabled = false;
+            $id('chatSendBtn').disabled = false;
         });
 }
 
-const chatInputEl = document.getElementById('chatInput');
+const chatInputEl = $id('chatInput');
 function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 100) + 'px'; }
 chatInputEl.addEventListener('input', function () { autoResize(this); });
 chatInputEl.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        document.getElementById('chatForm').dispatchEvent(new Event('submit'));
+        $id('chatForm').dispatchEvent(new Event('submit'));
     }
 });
 
-document.getElementById('chatSearchInput').addEventListener('input', function () {
+let _searchListTimer = null;
+$id('chatSearchInput').addEventListener('input', function () {
     const q = this.value.trim().toLowerCase();
-    document.querySelectorAll('.chat-item').forEach(item => {
-        const name = (item.getAttribute('data-name') || '').toLowerCase();
-        item.style.display = (!q || name.includes(q)) ? 'flex' : 'none';
-    });
+    clearTimeout(_searchListTimer);
+    _searchListTimer = setTimeout(() => {
+        const items = getChatItems();
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const name = (item.getAttribute('data-name') || '').toLowerCase();
+            item.style.display = (!q || name.includes(q)) ? 'flex' : 'none';
+        }
+    }, 80);
 });
 
-document.getElementById('chatBody').addEventListener('scroll', function () {
-    closeContextMenu();
-    if (this.scrollTop < 120 && hasMoreBefore && !loadingOlder) {
-        loadOlderMessages();
+/* ======================================================
+   ⚡ SCROLL HANDLER — قلب روانی اسکرول
+   ====================================================== */
+const _chatBodyEl = $id('chatBody');
+_chatBodyEl.addEventListener('scroll', function () {
+    // ⚡ علامت‌گذاری حالت اسکرول — انیمیشن‌ها موقتاً غیرفعال می‌شن
+    if (!_isScrolling) {
+        _isScrolling = true;
+        _chatBodyEl.classList.add('is-scrolling');
     }
-});
+    clearTimeout(_scrollEndTimer);
+    _scrollEndTimer = setTimeout(() => {
+        _isScrolling = false;
+        _chatBodyEl.classList.remove('is-scrolling');
+
+        // ⚡ اعمال پیام‌های معلق بعد از توقف اسکرول
+        if (_pendingMessages && _pendingMessages.length > 0) {
+            const body = $id('chatBody');
+            isAtBottom = (body.scrollHeight - body.scrollTop - body.clientHeight) < 80;
+            applyNewMessages(body, _pendingMessages, isAtBottom);
+            _pendingMessages = null;
+        }
+    }, 120);
+
+    // ⚡ throttle با rAF برای logic اصلی
+    if (_scrollRaf) return;
+    _scrollRaf = requestAnimationFrame(() => {
+        _scrollRaf = 0;
+        if (_chatBodyEl.scrollTop < 120 && hasMoreBefore && !loadingOlder) {
+            loadOlderMessages();
+        }
+    });
+}, { passive: true });
 
 function pollUnreadCounts() {
+    if (!_tabVisible) return;
     fetch('api.php?action=unread_counts', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
         .then(r => r.json())
         .then(data => {
             if (data.status !== 'success') return;
             const counts = data.counts || {};
-            document.querySelectorAll('.chat-item').forEach(item => {
-                if (item.getAttribute('data-is-saved') === '1') return;
+            const items = getChatItems();
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                if (item.getAttribute('data-is-saved') === '1') continue;
                 const uid = item.getAttribute('data-user-id');
-                if (!uid) return;
-                if (currentChatUserId && String(currentChatUserId) === uid && !currentIsSaved) return;
+                if (!uid) continue;
+                if (currentChatUserId && String(currentChatUserId) === uid && !currentIsSaved) continue;
                 const ex = item.querySelector('.chat-item__badge');
                 const c = counts[uid] || 0;
                 if (c > 0) {
-                    if (ex) ex.textContent = c;
+                    if (ex) { if (ex.textContent !== String(c)) ex.textContent = c; }
                     else {
                         const b = document.createElement('div');
                         b.className = 'chat-item__badge';
@@ -1029,7 +1256,7 @@ function pollUnreadCounts() {
                         item.appendChild(b);
                     }
                 } else if (ex) ex.remove();
-            });
+            }
         })
         .catch(() => { });
 }
@@ -1068,11 +1295,11 @@ function refreshSavedBadge() {
    SEARCH
    ====================================================== */
 function openSearchModal(defaultScope) {
-    const overlay = document.getElementById('searchModalOverlay');
+    const overlay = $id('searchModalOverlay');
     overlay.classList.add('active');
     document.body.style.overflow = 'hidden';
 
-    const convoBtn = document.getElementById('scopeConversationBtn');
+    const convoBtn = $id('scopeConversationBtn');
     if (currentChatUserId && !currentIsSaved) {
         convoBtn.disabled = false;
         if (defaultScope === 'conversation') {
@@ -1086,14 +1313,14 @@ function openSearchModal(defaultScope) {
     }
 
     setTimeout(() => {
-        const inp = document.getElementById('searchQueryInput');
+        const inp = $id('searchQueryInput');
         inp.focus();
         inp.select();
     }, 150);
 }
 
 function closeSearchModal() {
-    const overlay = document.getElementById('searchModalOverlay');
+    const overlay = $id('searchModalOverlay');
     overlay.classList.remove('active');
     document.body.style.overflow = '';
     if (searchAbortController) { searchAbortController.abort(); searchAbortController = null; }
@@ -1108,20 +1335,20 @@ function setSearchScope(scope) {
     if (searchInputTouched) triggerSearch();
 }
 
-document.getElementById('searchQueryInput').addEventListener('input', function () {
+$id('searchQueryInput').addEventListener('input', function () {
     searchInputTouched = true;
     clearTimeout(searchTimer);
     const q = this.value.trim();
     if (q.length < 2) {
-        document.getElementById('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-keyboard"></i>حداقل ۲ کاراکتر تایپ کنید تا جستجو شروع شود...</div>';
+        $id('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-keyboard"></i>حداقل ۲ کاراکتر تایپ کنید تا جستجو شروع شود...</div>';
         return;
     }
-    document.getElementById('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-spinner fa-spin"></i>در حال جستجو...</div>';
+    $id('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-spinner fa-spin"></i>در حال جستجو...</div>';
     searchTimer = setTimeout(triggerSearch, 400);
 });
 
 function triggerSearch() {
-    const q = document.getElementById('searchQueryInput').value.trim();
+    const q = $id('searchQueryInput').value.trim();
     if (q.length < 2) return;
 
     if (searchAbortController) searchAbortController.abort();
@@ -1134,34 +1361,35 @@ function triggerSearch() {
         .then(r => r.json())
         .then(data => {
             if (data.status !== 'success') {
-                document.getElementById('searchResultsBody').innerHTML = `<div class="search-modal__empty"><i class="fas fa-exclamation-circle"></i>${escapeHtml(data.message || 'خطا در جستجو')}</div>`;
+                $id('searchResultsBody').innerHTML = `<div class="search-modal__empty"><i class="fas fa-exclamation-circle"></i>${escapeHtml(data.message || 'خطا در جستجو')}</div>`;
                 return;
             }
             renderSearchResults(data.results || [], q);
         })
         .catch(err => {
             if (err.name === 'AbortError') return;
-            document.getElementById('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-exclamation-circle"></i>خطا در ارتباط با سرور</div>';
+            $id('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-exclamation-circle"></i>خطا در ارتباط با سرور</div>';
         });
 }
 
 function renderSearchResults(results, query) {
     lastSearchResults = results;
-    const body = document.getElementById('searchResultsBody');
+    const body = $id('searchResultsBody');
     if (results.length === 0) {
         body.innerHTML = `<div class="search-modal__empty"><i class="fas fa-search-minus"></i>نتیجه‌ای برای «${escapeHtml(query)}» یافت نشد</div>`;
         return;
     }
-    let html = `<div class="search-modal__info">${results.length} نتیجه یافت شد</div>`;
     const qLower = query.toLowerCase();
+    const parts = [`<div class="search-modal__info">${results.length} نتیجه یافت شد</div>`];
 
-    results.forEach(r => {
+    for (let i = 0; i < results.length; i++) {
+        const r = results[i];
         const createdMs = parseServerTime(r.created_at);
         const dateObj = createdMs ? new Date(createdMs) : new Date();
         const timeStr = formatTime(dateObj);
         const dayLabel = formatDayLabel(dateObj);
 
-        let avatar = '?';
+        let avatar;
         if (r.from_saved) avatar = '<i class="fas fa-bookmark"></i>';
         else avatar = escapeHtml(r.from_name ? r.from_name.charAt(0) : '?');
 
@@ -1175,7 +1403,7 @@ function renderSearchResults(results, query) {
         if (r.is_mine) badges += '<span class="search-result__badge">شما</span>';
         if (r.attachment_name) badges += '<span class="search-result__badge file">📎 فایل</span>';
 
-        html += `
+        parts.push(`
             <div class="search-result" onclick="jumpToResult(${r.id}, ${r.other_user_id}, ${r.from_saved ? 1 : 0})">
                 <div class="search-result__avatar ${r.from_saved ? 'is-saved-avatar' : ''}">${avatar}</div>
                 <div class="search-result__info">
@@ -1185,9 +1413,9 @@ function renderSearchResults(results, query) {
                     </div>
                     <div class="search-result__text">${highlighted || '(بدون متن)'}</div>
                 </div>
-            </div>`;
-    });
-    body.innerHTML = html;
+            </div>`);
+    }
+    body.innerHTML = parts.join('');
 }
 
 function highlightQuery(escapedText, qLower) {
@@ -1218,10 +1446,10 @@ function jumpToResult(msgId, otherUserId, fromSaved) {
 /* ======================================================
    LIGHTBOX
    ====================================================== */
-const lightboxEl = document.getElementById('imageLightbox');
-const lightboxImg = document.getElementById('lightboxImage');
-const lightboxCanvas = document.getElementById('lightboxCanvas');
-const zoomLevelEl = document.getElementById('zoomLevel');
+const lightboxEl = $id('imageLightbox');
+const lightboxImg = $id('lightboxImage');
+const lightboxCanvas = $id('lightboxCanvas');
+const zoomLevelEl = $id('zoomLevel');
 
 function openLightbox(src, name) {
     lightboxCurrentUrl = src;
@@ -1248,7 +1476,7 @@ function closeLightbox() {
     lightboxCurrentUrl = ''; lightboxCurrentName = '';
 }
 function updateLightboxTransform() {
-    lightboxImg.style.transform = `translate(${lightboxPanX}px, ${lightboxPanY}px) scale(${lightboxZoom})`;
+    lightboxImg.style.transform = `translate3d(${lightboxPanX}px, ${lightboxPanY}px, 0) scale(${lightboxZoom})`;
     zoomLevelEl.textContent = Math.round(lightboxZoom * 100) + '%';
 }
 function zoomIn() { if (lightboxZoom < ZOOM_MAX) { lightboxZoom = Math.min(ZOOM_MAX, lightboxZoom + ZOOM_STEP); updateLightboxTransform(); } }
@@ -1277,7 +1505,7 @@ document.addEventListener('mousemove', e => {
     lightboxPanX = e.clientX - dragStartX;
     lightboxPanY = e.clientY - dragStartY;
     updateLightboxTransform();
-});
+}, { passive: true });
 document.addEventListener('mouseup', () => {
     if (isDragging) { isDragging = false; lightboxCanvas.classList.remove('dragging'); }
 });
@@ -1302,7 +1530,7 @@ document.addEventListener('contextmenu', e => {
     }
 });
 document.addEventListener('click', e => {
-    const m = document.getElementById('msgContextMenu');
+    const m = $id('msgContextMenu');
     if (!m || !m.classList.contains('active')) return;
     if (e.target.closest('#msgContextMenu')) return;
     closeContextMenu();
@@ -1314,7 +1542,7 @@ document.addEventListener('keydown', e => {
         if (lightboxEl.classList.contains('active')) closeLightbox();
         closeDeleteModal();
         closeEditModal();
-        const sm = document.getElementById('searchModalOverlay');
+        const sm = $id('searchModalOverlay');
         if (sm.classList.contains('active')) closeSearchModal();
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'k')) {
@@ -1322,7 +1550,7 @@ document.addEventListener('keydown', e => {
         openSearchModal(currentChatUserId && !currentIsSaved ? 'conversation' : 'all');
     }
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        const em = document.getElementById('editModal');
+        const em = $id('editModal');
         if (em && em.classList.contains('active')) { e.preventDefault(); confirmEditMessage(); }
     }
     if (lightboxEl.classList.contains('active')) {
@@ -1336,21 +1564,52 @@ document.addEventListener('keydown', e => {
 });
 
 /* ======================================================
-   INIT
+   INIT & TIMERS
    ====================================================== */
-sendHeartbeat();
-setInterval(sendHeartbeat, 10000);
-setInterval(pollUnreadCounts, 8000);
-setInterval(fetchAllUsersStatus, 5000);
-setTimeout(fetchAllUsersStatus, 500);
 
-// ⭐ باز کردن خودکار گفتگو از طریق ?chat=USER_ID (کلیک روی نوتیف)
+let _hbTimer = null;
+let _unreadTimer = null;
+let _statusTimerAll = null;
+
+function startTimers() {
+    if (_hbTimer) clearInterval(_hbTimer);
+    if (_unreadTimer) clearInterval(_unreadTimer);
+    if (_statusTimerAll) clearInterval(_statusTimerAll);
+
+    _hbTimer = setInterval(sendHeartbeat, 10000);
+    _unreadTimer = setInterval(pollUnreadCounts, 8000);
+    _statusTimerAll = setInterval(fetchAllUsersStatus, 6000);
+}
+
+function stopTimers() {
+    if (_hbTimer) { clearInterval(_hbTimer); _hbTimer = null; }
+    if (_unreadTimer) { clearInterval(_unreadTimer); _unreadTimer = null; }
+    if (_statusTimerAll) { clearInterval(_statusTimerAll); _statusTimerAll = null; }
+}
+
+document.addEventListener('visibilitychange', () => {
+    _tabVisible = !document.hidden;
+    if (_tabVisible) {
+        sendHeartbeat();
+        if (currentChatUserId) pollNewMessages();
+        pollUnreadCounts();
+        fetchAllUsersStatus();
+        startTimers();
+    } else {
+        stopTimers();
+    }
+});
+
+sendHeartbeat();
+startTimers();
+initChatItemObserver();
+whenIdle(() => fetchAllUsersStatus());
+
 if (AUTO_OPEN_CHAT_ID > 0) {
     const autoItem = document.querySelector(`.chat-item[data-user-id="${AUTO_OPEN_CHAT_ID}"]`);
     if (autoItem) {
         setTimeout(() => openChat(AUTO_OPEN_CHAT_ID, autoItem), 350);
     }
-    // پاک‌سازی پارامتر chat از URL برای جلوگیری از رفرش تکراری
     try {
         const cleanUrl = new URL(window.location.href);
         cleanUrl.searchParams.delete('chat');
@@ -1360,14 +1619,20 @@ if (AUTO_OPEN_CHAT_ID > 0) {
 
 function escapeHtml(t) {
     if (t === null || t === undefined) return '';
+    const str = String(t);
+    const cached = _escapeCache.get(str);
+    if (cached !== undefined) return cached;
     const m = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(t).replace(/[&<>"']/g, c => m[c]);
+    const result = str.replace(/[&<>"']/g, c => m[c]);
+    if (_escapeCache.size > _ESC_MAX) _escapeCache.clear();
+    _escapeCache.set(str, result);
+    return result;
 }
 
 function toggleSidebar() {
-    const s = document.getElementById('appSidebar');
-    const o = document.getElementById('sidebarOverlay');
-    const b = document.getElementById('hamburgerBtn');
+    const s = $id('appSidebar');
+    const o = $id('sidebarOverlay');
+    const b = $id('hamburgerBtn');
     if (s.classList.contains('open')) closeSidebar();
     else {
         s.classList.add('open');
@@ -1377,9 +1642,9 @@ function toggleSidebar() {
     }
 }
 function closeSidebar() {
-    const s = document.getElementById('appSidebar');
-    const o = document.getElementById('sidebarOverlay');
-    const b = document.getElementById('hamburgerBtn');
+    const s = $id('appSidebar');
+    const o = $id('sidebarOverlay');
+    const b = $id('hamburgerBtn');
     if (!s || !o || !b) return;
     s.classList.remove('open');
     o.classList.remove('active');
@@ -1390,4 +1655,4 @@ let resizeTimer;
 window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => { if (window.innerWidth > 900) closeSidebar(); }, 150);
-});
+}, { passive: true });
