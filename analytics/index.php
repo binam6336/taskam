@@ -47,72 +47,114 @@ function gregorianToJalali($gy, $gm, $gd)
     }
     return [$jy, $jm, $jd];
 }
+
+// ⭐ تبدیل اعداد انگلیسی به فارسی
+function toPersianDigits($str)
+{
+    $en = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+    $fa = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+    return str_replace($en, $fa, (string)$str);
+}
+
+// ⭐ ماه‌های شمسی
+function getPersianMonths()
+{
+    return ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
+}
+
 function formatPersianDate($dt, $w = true)
 {
     if (empty($dt)) return '';
     $ts = strtotime($dt);
     if (!$ts) return $dt;
     list($jy, $jm, $jd) = gregorianToJalali((int)date('Y', $ts), (int)date('n', $ts), (int)date('j', $ts));
-    $mo = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
+    $mo = getPersianMonths();
     $wd = ['شنبه', 'یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه'];
     $p = ((int)date('w', $ts) + 1) % 7;
-    return ($w ? $wd[$p] . ' ' : '') . $jd . ' ' . $mo[$jm - 1] . ' ' . $jy . ' - ' . date('H:i', $ts);
+    return ($w ? $wd[$p] . ' ' : '') . toPersianDigits($jd) . ' ' . $mo[$jm - 1] . ' ' . toPersianDigits($jy) . ' - ' . toPersianDigits(date('H:i', $ts));
 }
+
 function formatPersianDateOnly($dt)
 {
     if (empty($dt)) return '';
     $ts = strtotime($dt);
     if (!$ts) return $dt;
     list($jy, $jm, $jd) = gregorianToJalali((int)date('Y', $ts), (int)date('n', $ts), (int)date('j', $ts));
-    $mo = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
-    return $jd . ' ' . $mo[$jm - 1] . ' ' . $jy;
+    $mo = getPersianMonths();
+    return toPersianDigits($jd) . ' ' . $mo[$jm - 1] . ' ' . toPersianDigits($jy);
 }
+
+// ⭐ تاریخ شمسی کوتاه (روز + ماه) برای برچسب نمودار ۷ روز
+function formatPersianDateShort($dt)
+{
+    if (empty($dt)) return '';
+    $ts = strtotime($dt);
+    if (!$ts) return $dt;
+    list($jy, $jm, $jd) = gregorianToJalali((int)date('Y', $ts), (int)date('n', $ts), (int)date('j', $ts));
+    $mo = getPersianMonths();
+    return toPersianDigits($jd) . ' ' . $mo[$jm - 1];
+}
+
+// ⭐ برچسب ماه شمسی (ماه + سال)
+function formatPersianMonthLabel($dt)
+{
+    if (empty($dt)) return '';
+    $ts = strtotime($dt);
+    if (!$ts) return $dt;
+    list($jy, $jm, $jd) = gregorianToJalali((int)date('Y', $ts), (int)date('n', $ts), (int)date('j', $ts));
+    $mo = getPersianMonths();
+    return $mo[$jm - 1] . ' ' . toPersianDigits($jy);
+}
+
 function formatPersianDateTime($dt)
 {
     if (empty($dt)) return '';
     $ts = strtotime($dt);
     if (!$ts) return $dt;
     list($jy, $jm, $jd) = gregorianToJalali((int)date('Y', $ts), (int)date('n', $ts), (int)date('j', $ts));
-    $mo = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
-    return $jd . ' ' . $mo[$jm - 1] . ' ' . $jy . ' - ' . date('H:i', $ts);
+    $mo = getPersianMonths();
+    return toPersianDigits($jd) . ' ' . $mo[$jm - 1] . ' ' . toPersianDigits($jy) . ' - ' . toPersianDigits(date('H:i', $ts));
 }
+
 function formatDuration($h)
 {
     $h = (float)$h;
     if ($h <= 0) return '—';
     if ($h < 1) {
         $m = round($h * 60);
-        return $m < 1 ? 'کمتر از ۱ دقیقه' : $m . ' دقیقه';
+        return $m < 1 ? 'کمتر از ۱ دقیقه' : toPersianDigits($m) . ' دقیقه';
     }
     if ($h < 24) {
         $hh = floor($h);
         $mm = round(($h - $hh) * 60);
-        return $mm == 0 ? $hh . ' ساعت' : $hh . ' ساعت و ' . $mm . ' دقیقه';
+        return $mm == 0 ? toPersianDigits($hh) . ' ساعت' : toPersianDigits($hh) . ' ساعت و ' . toPersianDigits($mm) . ' دقیقه';
     }
     $d = floor($h / 24);
     $rh = $h - ($d * 24);
     $hh = floor($rh);
     $mm = round(($rh - $hh) * 60);
-    $r = $d . ' روز';
-    if ($hh > 0) $r .= ' و ' . $hh . ' ساعت';
-    if ($mm > 0 && $hh == 0) $r .= ' و ' . $mm . ' دقیقه';
+    $r = toPersianDigits($d) . ' روز';
+    if ($hh > 0) $r .= ' و ' . toPersianDigits($hh) . ' ساعت';
+    if ($mm > 0 && $hh == 0) $r .= ' و ' . toPersianDigits($mm) . ' دقیقه';
     return $r;
 }
+
 function formatDelayDays($days)
 {
     $days = (int)$days;
     if ($days <= 0) return '—';
     if ($days === 1) return '۱ روز';
-    if ($days < 30) return $days . ' روز';
+    if ($days < 30) return toPersianDigits($days) . ' روز';
     $m = round($days / 30, 1);
-    return $m . ' ماه';
+    return toPersianDigits($m) . ' ماه';
 }
+
 function formatEarlyDays($days)
 {
     $days = (int)$days;
     if ($days <= 0) return 'همان روز';
     if ($days === 1) return '۱ روز جلوتر';
-    return $days . ' روز جلوتر';
+    return toPersianDigits($days) . ' روز جلوتر';
 }
 
 // ================== Project & Access ==================
@@ -158,10 +200,6 @@ $makeProjectImageUrl = function ($file) {
 };
 
 // ================== آمار کلی وظایف ==================
-// ⭐ منطق اصلاح‌شده:
-//   - on_time  = تکمیل‌شده و (بدون due_date یا DATE(completed_at) <= due_date)
-//   - late     = تکمیل‌شده و due_date دارد و DATE(completed_at) > due_date
-//   - overdue  = تکمیل نشده و due_date < امروز
 $stats = ['total' => 0, 'completed' => 0, 'pending' => 0, 'high' => 0, 'medium' => 0, 'low' => 0, 'with_due' => 0, 'overdue' => 0, 'on_time' => 0, 'late' => 0, 'unique_assignees' => 0, 'unique_creators' => 0];
 try {
     $stmt = $db->prepare("
@@ -239,14 +277,14 @@ try {
 $totalAttachments = $taskAttachCount + $noteAttachCount;
 $avgNotesPerTask = $stats['total'] > 0 ? round($notesCount / $stats['total'], 2) : 0;
 
-// ================== روند ۷ روز ==================
+// ================== روند ۷ روز (⭐ برچسب شمسی) ==================
 $trendDays = [];
 $trendCreated = [];
 $trendCompleted = [];
 $trendAvgHours = [];
 for ($i = 6; $i >= 0; $i--) {
     $date = date('Y-m-d', strtotime("-$i days"));
-    $trendDays[] = date('m/d', strtotime("-$i days"));
+    $trendDays[] = formatPersianDateShort($date); // ⭐ تاریخ شمسی کوتاه
     try {
         $stmt = $db->prepare("SELECT COUNT(*) FROM tasks WHERE project_id=? AND DATE(created_at)=?");
         $stmt->execute([$projectId, $date]);
@@ -265,14 +303,14 @@ for ($i = 6; $i >= 0; $i--) {
     }
 }
 
-// ================== روند ۶ ماه ==================
+// ================== روند ۶ ماه (⭐ برچسب شمسی) ==================
 $monthLabels = [];
 $monthCreated = [];
 $monthCompleted = [];
 for ($i = 5; $i >= 0; $i--) {
     $start = date('Y-m-01', strtotime("-$i months"));
     $end = date('Y-m-t', strtotime("-$i months"));
-    $monthLabels[] = date('m/Y', strtotime("-$i months"));
+    $monthLabels[] = formatPersianMonthLabel($start); // ⭐ ماه شمسی
     try {
         $stmt = $db->prepare("SELECT COUNT(*) FROM tasks WHERE project_id=? AND DATE(created_at) BETWEEN ? AND ?");
         $stmt->execute([$projectId, $start, $end]);
@@ -384,10 +422,7 @@ try {
 } catch (PDOException $e) {
 }
 
-// ================== ⭐ تحلیل زمانبندی (اصلاح‌شده نهایی) ==================
-//   - on_time  = تکمیل‌شده و (بدون due_date یا DATE(completed_at) <= due_date)
-//   - late     = تکمیل‌شده و due_date دارد و DATE(completed_at) > due_date
-//   - pending  = تکمیل نشده (کل)
+// ================== تحلیل زمانبندی ==================
 $scheduleStats = [
     'with_due' => 0,
     'on_time' => 0,
@@ -481,7 +516,7 @@ try {
 } catch (PDOException $e) {
 }
 
-// ================== وظایف نیازمند توجه (انجام نشده با مهلت نزدیک/گذشته) ==================
+// ================== وظایف نیازمند توجه ==================
 $upcomingOverdueTasks = [];
 try {
     $stmt = $db->prepare("
@@ -506,7 +541,7 @@ try {
             'id' => (int)$r['id'],
             'title' => (string)$r['title'],
             'due_date' => formatPersianDateOnly($r['due_date'] . ' 00:00:00'),
-            'due_time' => $r['due_time'] ? substr($r['due_time'], 0, 5) : '',
+            'due_time' => $r['due_time'] ? toPersianDigits(substr($r['due_time'], 0, 5)) : '',
             'priority' => (string)$r['priority'],
             'assignee_name' => $fullName,
             'assignee_initial' => mb_substr(trim($r['first_name'] ?: ($r['u_mobile'] ?? '?')), 0, 1, 'UTF-8'),
@@ -641,10 +676,10 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                             <option value="kpi">کل پروژه</option>
                         </select>
                     </div>
-                    <div class="hero-side__value"><?= $completionRate ?><small>%</small></div>
+                    <div class="hero-side__value"><?= toPersianDigits($completionRate) ?><small>%</small></div>
                     <div class="hero-side__sub">
-                        <span class="pill <?= $completionRate >= 50 ? '' : 'down' ?>"><?= $stats['completed'] ?> انجام شده</span>
-                        <span><?= $stats['pending'] ?> باقی‌مانده</span>
+                        <span class="pill <?= $completionRate >= 50 ? '' : 'down' ?>"><?= toPersianDigits($stats['completed']) ?> انجام شده</span>
+                        <span><?= toPersianDigits($stats['pending']) ?> باقی‌مانده</span>
                     </div>
                     <div class="hero-side__mini-chart"><canvas id="kpiMiniChart"></canvas></div>
                 </div>
@@ -707,17 +742,17 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                                                     </div>
                                                 </div>
                                             </td>
-                                            <td><span class="cell-pill green"><?= $m['completed'] ?></span><span style="color:#cbd5e1;font-size:.7rem;margin-right:4px;">/ <?= $m['total'] ?></span></td>
+                                            <td><span class="cell-pill green"><?= toPersianDigits($m['completed']) ?></span><span style="color:#cbd5e1;font-size:.7rem;margin-right:4px;">/ <?= toPersianDigits($m['total']) ?></span></td>
                                             <td>
                                                 <div class="table-progress">
                                                     <div class="table-progress__track">
                                                         <div class="table-progress__fill" style="width:<?= $m['total'] > 0 ? $m['rate'] : 0 ?>%;background:<?= $rc ?>;"></div>
                                                     </div>
-                                                    <div class="table-progress__value" style="color:<?= $rc ?>;"><?= $m['total'] > 0 ? $m['rate'] . '%' : '—' ?></div>
+                                                    <div class="table-progress__value" style="color:<?= $rc ?>;"><?= $m['total'] > 0 ? toPersianDigits($m['rate']) . '%' : '—' ?></div>
                                                 </div>
                                             </td>
                                             <td><?php if ($m['avg_hours'] > 0): ?><span class="cell-mono small"><?= formatDuration($m['avg_hours']) ?></span><?php else: ?><span class="cell-mono small" style="color:#cbd5e1;">—</span><?php endif; ?></td>
-                                            <td><?php if ($m['notes'] > 0): ?><span class="cell-pill violet"><i class="fas fa-comments" style="font-size:.7rem;"></i><?= $m['notes'] ?></span><?php else: ?><span class="cell-mono small" style="color:#cbd5e1;">۰</span><?php endif; ?></td>
+                                            <td><?php if ($m['notes'] > 0): ?><span class="cell-pill violet"><i class="fas fa-comments" style="font-size:.7rem;"></i><?= toPersianDigits($m['notes']) ?></span><?php else: ?><span class="cell-mono small" style="color:#cbd5e1;">۰</span><?php endif; ?></td>
                                         </tr>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
@@ -733,14 +768,14 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                     </div>
                     <div class="summary-insight">
                         <?php if ($completionRate >= 70): ?>
-                            نرخ تکمیل پروژه <strong><?= $completionRate ?>%</strong> است — عملکرد تیم <span class="highlight-green">عالی</span> ارزیابی می‌شود.
+                            نرخ تکمیل پروژه <strong><?= toPersianDigits($completionRate) ?>%</strong> است — عملکرد تیم <span class="highlight-green">عالی</span> ارزیابی می‌شود.
                         <?php elseif ($completionRate >= 40): ?>
-                            نرخ تکمیل پروژه <strong><?= $completionRate ?>%</strong> است — روند <strong>متعادل</strong> ادامه دارد.
+                            نرخ تکمیل پروژه <strong><?= toPersianDigits($completionRate) ?>%</strong> است — روند <strong>متعادل</strong> ادامه دارد.
                         <?php else: ?>
-                            نرخ تکمیل پروژه <strong><?= $completionRate ?>%</strong> است — نیاز به <span class="highlight-red">توجه بیشتر</span> دارد.
+                            نرخ تکمیل پروژه <strong><?= toPersianDigits($completionRate) ?>%</strong> است — نیاز به <span class="highlight-red">توجه بیشتر</span> دارد.
                         <?php endif; ?>
                         <?php if ($scheduleStats['late'] > 0): ?>
-                            همچنین <span class="highlight-red"><?= $scheduleStats['late'] ?> وظیفه</span> با تاخیر تکمیل شده است.
+                            همچنین <span class="highlight-red"><?= toPersianDigits($scheduleStats['late']) ?> وظیفه</span> با تاخیر تکمیل شده است.
                         <?php else: ?>
                             هیچ وظیفه‌ای با تاخیر تکمیل نشده است. ✅
                         <?php endif; ?>
@@ -748,32 +783,32 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                     <div class="summary-mini-grid">
                         <div class="mini-metric">
                             <div class="mini-metric__label">به موقع</div>
-                            <div class="mini-metric__value green"><?= $scheduleStats['on_time'] ?></div>
+                            <div class="mini-metric__value green"><?= toPersianDigits($scheduleStats['on_time']) ?></div>
                         </div>
                         <div class="mini-metric">
                             <div class="mini-metric__label">با تاخیر</div>
-                            <div class="mini-metric__value orange"><?= $scheduleStats['late'] ?></div>
+                            <div class="mini-metric__value orange"><?= toPersianDigits($scheduleStats['late']) ?></div>
                         </div>
                         <div class="mini-metric">
                             <div class="mini-metric__label">انجام نشده</div>
-                            <div class="mini-metric__value red"><?= $scheduleStats['pending_total'] ?></div>
+                            <div class="mini-metric__value red"><?= toPersianDigits($scheduleStats['pending_total']) ?></div>
                         </div>
                     </div>
                     <div class="summary-bars">
                         <div class="summary-bar-row"><span class="label">انجام شده</span>
                             <div class="bar-track">
                                 <div class="bar-fill" style="width:<?= $completionRate ?>%;background:linear-gradient(90deg,#10b981,#34d399);"></div>
-                            </div><span class="value"><?= $stats['completed'] ?></span>
+                            </div><span class="value"><?= toPersianDigits($stats['completed']) ?></span>
                         </div>
                         <div class="summary-bar-row"><span class="label">در انتظار</span>
                             <div class="bar-track">
                                 <div class="bar-fill" style="width:<?= $stats['total'] > 0 ? round(($stats['pending'] / $stats['total']) * 100) : 0 ?>%;background:linear-gradient(90deg,#f59e0b,#fbbf24);"></div>
-                            </div><span class="value"><?= $stats['pending'] ?></span>
+                            </div><span class="value"><?= toPersianDigits($stats['pending']) ?></span>
                         </div>
                         <div class="summary-bar-row"><span class="label">اولویت زیاد</span>
                             <div class="bar-track">
                                 <div class="bar-fill" style="width:<?= $stats['total'] > 0 ? round(($stats['high'] / $stats['total']) * 100) : 0 ?>%;background:linear-gradient(90deg,#ef4444,#f87171);"></div>
-                            </div><span class="value"><?= $stats['high'] ?></span>
+                            </div><span class="value"><?= toPersianDigits($stats['high']) ?></span>
                         </div>
                     </div>
                 </div>
@@ -890,26 +925,23 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
 
                 <!-- 6 Stat Cards -->
                 <div class="schedule-grid">
-                    <!-- 1. دارای مهلت -->
                     <div class="schedule-card">
                         <div class="schedule-card__icon violet"><i class="fas fa-calendar-check"></i></div>
-                        <div class="schedule-card__value"><?= $scheduleStats['with_due'] ?></div>
+                        <div class="schedule-card__value"><?= toPersianDigits($scheduleStats['with_due']) ?></div>
                         <div class="schedule-card__label">وظایف دارای مهلت</div>
                         <div class="schedule-card__sub">دارای تاریخ سررسید</div>
                     </div>
 
-                    <!-- 2. به موقع انجام شده -->
                     <div class="schedule-card">
                         <div class="schedule-card__icon green"><i class="fas fa-check-circle"></i></div>
-                        <div class="schedule-card__value" style="color:#059669;"><?= $scheduleStats['on_time'] ?></div>
+                        <div class="schedule-card__value" style="color:#059669;"><?= toPersianDigits($scheduleStats['on_time']) ?></div>
                         <div class="schedule-card__label">به موقع انجام شده</div>
                         <div class="schedule-card__sub">شامل بدون‌مهلت + رعایت مهلت</div>
                     </div>
 
-                    <!-- 3. انجام با تاخیر -->
                     <div class="schedule-card">
                         <div class="schedule-card__icon orange"><i class="fas fa-exclamation-triangle"></i></div>
-                        <div class="schedule-card__value" style="color:#d97706;"><?= $scheduleStats['late'] ?></div>
+                        <div class="schedule-card__value" style="color:#d97706;"><?= toPersianDigits($scheduleStats['late']) ?></div>
                         <div class="schedule-card__label">انجام با تاخیر</div>
                         <div class="schedule-card__sub">
                             <?php if ($scheduleStats['avg_delay_days'] > 0): ?>
@@ -920,23 +952,20 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                         </div>
                     </div>
 
-                    <!-- 4. انجام نشده (کل) -->
                     <div class="schedule-card">
                         <div class="schedule-card__icon red"><i class="fas fa-hourglass-half"></i></div>
-                        <div class="schedule-card__value" style="color:#dc2626;"><?= $scheduleStats['pending_total'] ?></div>
+                        <div class="schedule-card__value" style="color:#dc2626;"><?= toPersianDigits($scheduleStats['pending_total']) ?></div>
                         <div class="schedule-card__label">انجام نشده</div>
                         <div class="schedule-card__sub">بدون توجه به مهلت</div>
                     </div>
 
-                    <!-- 5. نرخ وقت‌شناسی -->
                     <div class="schedule-card">
                         <div class="schedule-card__icon teal"><i class="fas fa-percentage"></i></div>
-                        <div class="schedule-card__value" style="color:#0d9488;"><?= $scheduleStats['punctuality_rate'] ?>%</div>
+                        <div class="schedule-card__value" style="color:#0d9488;"><?= toPersianDigits($scheduleStats['punctuality_rate']) ?>%</div>
                         <div class="schedule-card__label">نرخ وقت‌شناسی</div>
-                        <div class="schedule-card__sub">از <?= $scheduleStats['on_time'] + $scheduleStats['late'] ?> وظیفه داوری‌شده</div>
+                        <div class="schedule-card__sub">از <?= toPersianDigits($scheduleStats['on_time'] + $scheduleStats['late']) ?> وظیفه داوری‌شده</div>
                     </div>
 
-                    <!-- 6. بیشترین تاخیر -->
                     <div class="schedule-card">
                         <div class="schedule-card__icon orange"><i class="fas fa-clock-rotate-left"></i></div>
                         <div class="schedule-card__value" style="color:#ea580c;">
@@ -970,7 +999,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                 <div class="schedule-tasks-table">
                     <div class="schedule-tasks-head">
                         <h4><i class="fas fa-bell"></i> وظایف نیازمند توجه (انجام نشده تا ۲ روز آینده یا عقب‌افتاده)</h4>
-                        <span class="schedule-tasks-count"><?= count($upcomingOverdueTasks) ?> وظیفه</span>
+                        <span class="schedule-tasks-count"><?= toPersianDigits(count($upcomingOverdueTasks)) ?> وظیفه</span>
                     </div>
                     <?php if (empty($upcomingOverdueTasks)): ?>
                         <div class="schedule-tasks-empty">
@@ -985,7 +1014,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                                     $cls = 'overdue';
                                     $icon = 'fa-clock-rotate-left';
                                     $absD = abs($dd);
-                                    $diffLabel = ($absD === 1) ? '۱ روز تاخیر' : ($absD . ' روز تاخیر');
+                                    $diffLabel = ($absD === 1) ? '۱ روز تاخیر' : (toPersianDigits($absD) . ' روز تاخیر');
                                 } elseif ($dd === 0) {
                                     $cls = 'soon';
                                     $icon = 'fa-hourglass-end';
@@ -997,7 +1026,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                                 } else {
                                     $cls = 'upcoming';
                                     $icon = 'fa-clock';
-                                    $diffLabel = $dd . ' روز مانده';
+                                    $diffLabel = toPersianDigits($dd) . ' روز مانده';
                                 }
                                 $prioLabel = ['low' => 'کم', 'medium' => 'متوسط', 'high' => 'زیاد'][$t['priority']] ?? $t['priority'];
                             ?>
