@@ -158,6 +158,10 @@ $makeProjectImageUrl = function ($file) {
 };
 
 // ================== آمار کلی وظایف ==================
+// ⭐ منطق اصلاح‌شده:
+//   - on_time  = تکمیل‌شده و (بدون due_date یا DATE(completed_at) <= due_date)
+//   - late     = تکمیل‌شده و due_date دارد و DATE(completed_at) > due_date
+//   - overdue  = تکمیل نشده و due_date < امروز
 $stats = ['total' => 0, 'completed' => 0, 'pending' => 0, 'high' => 0, 'medium' => 0, 'low' => 0, 'with_due' => 0, 'overdue' => 0, 'on_time' => 0, 'late' => 0, 'unique_assignees' => 0, 'unique_creators' => 0];
 try {
     $stmt = $db->prepare("
@@ -169,8 +173,16 @@ try {
             SUM(CASE WHEN priority='low' THEN 1 ELSE 0 END) AS low,
             SUM(CASE WHEN due_date IS NOT NULL THEN 1 ELSE 0 END) AS with_due,
             SUM(CASE WHEN is_completed=0 AND due_date IS NOT NULL AND due_date < CURDATE() THEN 1 ELSE 0 END) AS overdue,
-            SUM(CASE WHEN is_completed=1 AND due_date IS NOT NULL AND completed_at IS NOT NULL AND DATE(completed_at) <= due_date THEN 1 ELSE 0 END) AS on_time,
-            SUM(CASE WHEN is_completed=1 AND due_date IS NOT NULL AND completed_at IS NOT NULL AND DATE(completed_at) > due_date THEN 1 ELSE 0 END) AS late,
+            SUM(CASE 
+                WHEN is_completed=1 
+                 AND (due_date IS NULL OR (completed_at IS NOT NULL AND DATE(completed_at) <= due_date))
+                THEN 1 ELSE 0 END) AS on_time,
+            SUM(CASE 
+                WHEN is_completed=1 
+                 AND due_date IS NOT NULL 
+                 AND completed_at IS NOT NULL
+                 AND DATE(completed_at) > due_date
+                THEN 1 ELSE 0 END) AS late,
             COUNT(DISTINCT assignee_id) AS unique_assignees,
             COUNT(DISTINCT user_id) AS unique_creators
         FROM tasks WHERE project_id = ?
@@ -372,12 +384,15 @@ try {
 } catch (PDOException $e) {
 }
 
-// ================== ⭐ تحلیل زمانبندی (منطق جدید) ==================
+// ================== ⭐ تحلیل زمانبندی (اصلاح‌شده نهایی) ==================
+//   - on_time  = تکمیل‌شده و (بدون due_date یا DATE(completed_at) <= due_date)
+//   - late     = تکمیل‌شده و due_date دارد و DATE(completed_at) > due_date
+//   - pending  = تکمیل نشده (کل)
 $scheduleStats = [
-    'with_due' => 0,          // دارای مهلت
-    'on_time' => 0,           // به موقع انجام شده
-    'late' => 0,              // انجام با تاخیر
-    'pending_total' => 0,     // انجام نشده (کل)
+    'with_due' => 0,
+    'on_time' => 0,
+    'late' => 0,
+    'pending_total' => 0,
     'avg_delay_days' => 0,
     'avg_early_days' => 0,
     'max_delay_days' => 0,
@@ -390,9 +405,7 @@ try {
             SUM(CASE WHEN due_date IS NOT NULL THEN 1 ELSE 0 END) AS with_due,
             SUM(CASE 
                 WHEN is_completed=1 
-                 AND due_date IS NOT NULL 
-                 AND completed_at IS NOT NULL
-                 AND DATE(completed_at) <= due_date
+                 AND (due_date IS NULL OR (completed_at IS NOT NULL AND DATE(completed_at) <= due_date))
                 THEN 1 ELSE 0 END) AS on_time,
             SUM(CASE 
                 WHEN is_completed=1 
@@ -442,8 +455,8 @@ try {
             assignee_id AS uid,
             COUNT(CASE WHEN due_date IS NOT NULL THEN 1 END) AS with_due,
             SUM(CASE 
-                WHEN is_completed=1 AND due_date IS NOT NULL AND completed_at IS NOT NULL
-                 AND DATE(completed_at) <= due_date
+                WHEN is_completed=1 
+                 AND (due_date IS NULL OR (completed_at IS NOT NULL AND DATE(completed_at) <= due_date))
                 THEN 1 ELSE 0 END) AS on_time,
             SUM(CASE 
                 WHEN is_completed=1 AND due_date IS NOT NULL AND completed_at IS NOT NULL
@@ -555,9 +568,6 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
     <link rel="icon" href="https://img.icons8.com/color/48/dashboard-layout.png" type="image/png">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="style.css">
-    <style>
-        /* ... (همان style قبلی بدون هیچ تغییر) ... */
-    </style>
 </head>
 
 <body>
@@ -863,13 +873,13 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                 </div>
             </div>
 
-            <!-- ⭐ SCHEDULING SECTION (منطق جدید) -->
+            <!-- SCHEDULING SECTION -->
             <div class="schedule-section">
                 <div class="schedule-section__head">
                     <div class="schedule-section__title-wrap">
                         <h3><i class="fas fa-calendar-clock"></i> تحلیل زمانبندی</h3>
                         <div class="schedule-section__desc">
-                            مقایسه فقط بر اساس <strong>تاریخ</strong> انجام می‌شود — اگر تاریخ تکمیل بعد از تاریخ سررسید باشد، «با تاخیر» محسوب می‌شود
+                            مقایسه فقط بر اساس <strong>تاریخ</strong> — تسک‌های بدون مهلت <strong>به موقع</strong> محسوب می‌شوند
                         </div>
                     </div>
                     <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0;">
@@ -878,7 +888,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                     </div>
                 </div>
 
-                <!-- 6 Stat Cards (منطق جدید) -->
+                <!-- 6 Stat Cards -->
                 <div class="schedule-grid">
                     <!-- 1. دارای مهلت -->
                     <div class="schedule-card">
@@ -893,7 +903,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                         <div class="schedule-card__icon green"><i class="fas fa-check-circle"></i></div>
                         <div class="schedule-card__value" style="color:#059669;"><?= $scheduleStats['on_time'] ?></div>
                         <div class="schedule-card__label">به موقع انجام شده</div>
-                        <div class="schedule-card__sub">تاریخ انجام ≤ تاریخ مهلت</div>
+                        <div class="schedule-card__sub">شامل بدون‌مهلت + رعایت مهلت</div>
                     </div>
 
                     <!-- 3. انجام با تاخیر -->
@@ -959,7 +969,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
                 <!-- Upcoming / Overdue Tasks Table -->
                 <div class="schedule-tasks-table">
                     <div class="schedule-tasks-head">
-                        <h4><i class="fas fa-bell"></i> وظایف نیازمند توجه (انجام نشده تا ۲ روز آینده)</h4>
+                        <h4><i class="fas fa-bell"></i> وظایف نیازمند توجه (انجام نشده تا ۲ روز آینده یا عقب‌افتاده)</h4>
                         <span class="schedule-tasks-count"><?= count($upcomingOverdueTasks) ?> وظیفه</span>
                     </div>
                     <?php if (empty($upcomingOverdueTasks)): ?>
