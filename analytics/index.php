@@ -610,7 +610,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
     <title>تحلیل‌های پروژه | <?= htmlspecialchars($project['title']) ?></title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="icon" href="https://img.icons8.com/color/48/dashboard-layout.png" type="image/png">
-    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 
