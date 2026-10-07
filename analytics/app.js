@@ -1,4 +1,3 @@
-window.ANALYTICS_DATA = <?= $dashboardDataJson ?>;
 
 function formatDurationJS(hours) {
     hours = parseFloat(hours) || 0;

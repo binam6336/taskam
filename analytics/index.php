@@ -1066,9 +1066,11 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
         </div>
     </div>
 
-    <script src="app.js">
-
+    <script>
+        window.ANALYTICS_DATA = <?= $dashboardDataJson ?>;
     </script>
+
+    <script src="app.js"></script>
 </body>
 
 </html>
