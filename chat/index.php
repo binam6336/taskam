@@ -11,12 +11,9 @@ if (!Auth::check()) {
 }
 
 $db = Database::getInstance();
-try {
-    $db->exec("SET NAMES 'utf8mb4'");
-    $db->exec("SET CHARACTER SET utf8mb4");
-    $db->exec("SET character_set_connection = utf8mb4");
-} catch (PDOException $e) {
-}
+
+// ⚡ بهینه‌سازی: SET NAMES حذف شد — این تنظیمات در DSN (charset=utf8mb4) اعمال می‌شوند
+// و هر exec یک round-trip اضافی به MySQL بود.
 
 $userId = (int)$_SESSION['user_id'];
 $page = 'chat';
@@ -24,11 +21,13 @@ $page = 'chat';
 // ⭐ اگر از طریق نوتیف مرورگر وارد شده باشد (chat.php?chat=USER_ID)
 $autoOpenChatId = (int)($_GET['chat'] ?? 0);
 
+// به‌روزرسانی last_seen
 try {
     $db->prepare("UPDATE users SET last_seen=? WHERE id=?")->execute([time(), $userId]);
 } catch (PDOException $e) {
 }
 
+// اطمینان از وجود جدول (بدون تغییر ساختار)
 try {
     $db->exec("CREATE TABLE IF NOT EXISTS colleague_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -50,9 +49,9 @@ try {
 } catch (PDOException $e) {
 }
 
-// ⭐ لیست چت: همکاران + کاربرانی که مکالمه قبلی با آن‌ها وجود دارد (برای ربات تسکام)
+// ⚡ بهینه‌سازی: حذف DISTINCT غیرضروری (FROM users تنهاست، امکان تکرار ردیف وجود ندارد)
 $chatListStmt = $db->prepare("
-    SELECT DISTINCT u.id AS user_id, u.first_name, u.last_name, u.mobile, u.avatar,
+    SELECT u.id AS user_id, u.first_name, u.last_name, u.mobile, u.avatar,
         (SELECT COUNT(*) FROM colleague_blocks cb WHERE cb.blocker_user_id=? AND cb.blocked_user_id=u.id) AS is_blocked_by_me,
         (SELECT COUNT(*) FROM colleague_blocks cb WHERE cb.blocker_user_id=u.id AND cb.blocked_user_id=?) AS has_blocked_me,
         (SELECT COUNT(*) FROM colleague_messages cm WHERE cm.sender_id=u.id AND cm.receiver_id=? AND cm.is_read=0) AS unread_count,
@@ -68,18 +67,26 @@ $chatListStmt = $db->prepare("
 $chatListStmt->execute([$userId, $userId, $userId, $userId, $userId, $userId, $userId, $userId, $userId, $userId]);
 $chatList = $chatListStmt->fetchAll(PDO::FETCH_ASSOC);
 
+// ⚡ بهینه‌سازی: is_file سریع‌تر از file_exists است
 $makeAvatarUrl = function ($avatarFile) {
-    if (!empty($avatarFile) && file_exists(__DIR__ . '/../uploads/avatars/' . $avatarFile)) return '../uploads/avatars/' . $avatarFile;
+    if (!empty($avatarFile) && is_file(__DIR__ . '/../uploads/avatars/' . $avatarFile)) {
+        return '../uploads/avatars/' . $avatarFile;
+    }
     return null;
 };
 
-$savedLastStmt = $db->prepare("SELECT id, message, attachment, attachment_name, attachment_type, attachment_size, created_at FROM colleague_messages WHERE sender_id=? AND receiver_id=? ORDER BY id DESC LIMIT 1");
-$savedLastStmt->execute([$userId, $userId]);
-$savedLastMsg = $savedLastStmt->fetch(PDO::FETCH_ASSOC);
+// ⚡ بهینه‌سازی: ادغام دو کوئری (آخرین پیام + تعداد کل) در یک کوئری واحد
+$savedStmt = $db->prepare("
+    SELECT id, message, attachment, attachment_name, attachment_type, attachment_size, created_at,
+        (SELECT COUNT(*) FROM colleague_messages cm2 WHERE cm2.sender_id=? AND cm2.receiver_id=?) AS total_count
+    FROM colleague_messages
+    WHERE sender_id=? AND receiver_id=?
+    ORDER BY id DESC LIMIT 1");
+$savedStmt->execute([$userId, $userId, $userId, $userId]);
+$savedRow = $savedStmt->fetch(PDO::FETCH_ASSOC);
 
-$savedCountStmt = $db->prepare("SELECT COUNT(*) FROM colleague_messages WHERE sender_id=? AND receiver_id=?");
-$savedCountStmt->execute([$userId, $userId]);
-$savedTotalCount = (int)$savedCountStmt->fetchColumn();
+$savedLastMsg = $savedRow ?: null;
+$savedTotalCount = $savedRow ? (int)$savedRow['total_count'] : 0;
 
 $savedItem = [
     'user_id' => $userId,
@@ -123,7 +130,13 @@ $sidebarUnread = $totalUnread;
 $displayUser = $_SESSION['user_mobile'] ?? $_SESSION['mobile'] ?? $_SESSION['username'] ?? 'کاربر';
 
 $chatListJson = json_encode(array_map(function ($cl) {
-    return ['user_id' => (int)$cl['user_id'], 'name' => $cl['full_name'], 'initial' => $cl['initial'], 'avatar_url' => $cl['avatar_url'], 'is_saved' => !empty($cl['is_saved'])];
+    return [
+        'user_id' => (int)$cl['user_id'],
+        'name' => $cl['full_name'],
+        'initial' => $cl['initial'],
+        'avatar_url' => $cl['avatar_url'],
+        'is_saved' => !empty($cl['is_saved'])
+    ];
 }, $chatList), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 ?>
 <!DOCTYPE html>
@@ -133,12 +146,16 @@ $chatListJson = json_encode(array_map(function ($cl) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
     <title>گفتگو با همکاران</title>
+
+    <!-- ⚡ Preconnect برای کاهش تأخیر اتصال به CDN -->
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
+    <link rel="preconnect" href="https://img.icons8.com" crossorigin>
+    <link rel="dns-prefetch" href="https://img.icons8.com">
+
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="icon" href="https://img.icons8.com/color/48/dashboard-layout.png" type="image/png">
     <link rel="stylesheet" href="style.css">
-    <style>
-
-    </style>
 </head>
 
 <body>
@@ -163,7 +180,7 @@ $chatListJson = json_encode(array_map(function ($cl) {
                         <div class="chat-sidebar__subtitle"><?= count($chatList) ?> مکالمه</div>
                     </div>
                     <div class="chat-sidebar__search">
-                        <input type="text" id="chatSearchInput" placeholder="🔍 جستجو در همکاران...">
+                        <input type="text" id="chatSearchInput" placeholder="🔍 جستجو در همکاران..." autocomplete="off" spellcheck="false">
                     </div>
                     <div class="chat-list" id="chatListContainer">
                         <?php if (empty($chatList)): ?>
@@ -189,7 +206,7 @@ $chatListJson = json_encode(array_map(function ($cl) {
                                     <div class="chat-item__avatar <?= $isSaved ? 'is-saved-avatar' : '' ?> <?= $isBot ? 'is-bot-avatar' : '' ?>" data-avatar-for="<?= (int)$cl['user_id'] ?>">
                                         <?php if ($isSaved): ?><i class="fas fa-bookmark"></i>
                                         <?php elseif ($isBot): ?><i class="fas fa-robot"></i>
-                                        <?php elseif ($cl['avatar_url']): ?><img src="<?= htmlspecialchars($cl['avatar_url']) ?>" alt="">
+                                        <?php elseif ($cl['avatar_url']): ?><img src="<?= htmlspecialchars($cl['avatar_url']) ?>" alt="" loading="lazy" decoding="async">
                                             <?php else: ?><?= htmlspecialchars($cl['initial']) ?><?php endif; ?>
                                     </div>
                                     <div class="chat-item__info">
@@ -306,7 +323,7 @@ $chatListJson = json_encode(array_map(function ($cl) {
                 <div class="search-modal__input-wrap">
                     <i class="fas fa-search"></i>
                     <input type="text" class="search-modal__input" id="searchQueryInput"
-                        placeholder="کلمه یا عبارت موردنظر را تایپ کنید..." autocomplete="off">
+                        placeholder="کلمه یا عبارت موردنظر را تایپ کنید..." autocomplete="off" spellcheck="false">
                 </div>
                 <div class="search-modal__scope" id="searchScopeRow">
                     <button type="button" class="search-modal__scope-btn active" data-scope="all" onclick="setSearchScope('all')">
@@ -331,7 +348,7 @@ $chatListJson = json_encode(array_map(function ($cl) {
         <button type="button" class="image-lightbox__close" onclick="closeLightbox()" title="بستن (Esc)"><i class="fas fa-times"></i></button>
         <div class="image-lightbox__topbar"><i class="fas fa-search-plus"></i><span id="zoomLevel">100%</span></div>
         <div class="image-lightbox__canvas" id="lightboxCanvas" onclick="if(event.target === this) closeLightbox()">
-            <img src="" alt="" class="image-lightbox__img" id="lightboxImage" draggable="false">
+            <img src="" alt="" class="image-lightbox__img" id="lightboxImage" draggable="false" decoding="async">
         </div>
         <div class="image-lightbox__controls" onclick="event.stopPropagation()">
             <button type="button" class="image-lightbox__btn" data-tooltip="کوچک‌نمایی (-)" onclick="zoomOut()"><i class="fas fa-search-minus"></i></button>
@@ -408,7 +425,7 @@ $chatListJson = json_encode(array_map(function ($cl) {
         const CHAT_LIST = <?= $chatListJson ?>;
         const AUTO_OPEN_CHAT_ID = <?= (int)$autoOpenChatId ?>;
     </script>
-    <script src="app.js"></script>
+    <script src="app.js" defer></script>
 </body>
 
 </html>
