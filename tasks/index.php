@@ -5307,1334 +5307,80 @@ require_once __DIR__ . '/../includes/sidebar.php';
     <div class="app-toast" id="appToast"><i class="fas fa-check-circle"></i><span id="appToastText"></span></div>
 
     <script>
+        /* ============================================================
+   CHAT PAGE SCRIPT
+   صفحه چت — تمام منطق محلی (UI، پیام‌ها، جستجو، لایت‌باکس، ...)
+   نوتیفیکیشن‌های سراسری توسط assets/js/chat_notifications.js مدیریت می‌شود.
+============================================================ */
+
         const CURRENT_USER_ID = <?= (int)$userId ?>;
-        const CSRF_TOKEN = <?= safeJsonEncode($csrfToken) ?>;
-        const ASSIGNEE_OPTIONS = <?= $assigneeOptionsJson ?>;
-        const PROJECT_OPTIONS = <?= $projectOptionsJson ?>;
-        const PROJECTS_MEMBERS = <?= $projectsMembersJson ?>;
-        const MENTION_OPTIONS = <?= $mentionOptionsJson ?>;
-        <?php if ($sharedTaskData): ?>
-            var SHARED_TASK_DATA = <?= safeJsonEncode($sharedTaskData) ?>;
-            var SHARED_TASK_PERMS = {
-                edit: <?= $sharedCanEdit ? 'true' : 'false' ?>,
-                reassign: <?= $sharedCanReassign ? 'true' : 'false' ?>,
-                change_project: <?= $sharedCanChangeProject ? 'true' : 'false' ?>,
-                complete: <?= $sharedCanComplete ? 'true' : 'false' ?>
-            };
-        <?php endif; ?>
+        const CHAT_LIST = <?= $chatListJson ?>;
+        const AUTO_OPEN_CHAT_ID = <?= (int)$autoOpenChatId ?>;
 
-            (function() {
-                function ie(el) {
-                    if (!el || !el.tagName) return false;
-                    const t = el.tagName.toLowerCase();
-                    return t === 'input' || t === 'textarea' || t === 'select' || el.isContentEditable;
-                }
+        const MAX_FILE_SIZE = 50 * 1024 * 1024;
+        const ALLOWED_EXTENSIONS = ['png', 'jpg', 'jpeg', 'pdf', 'zip', 'txt'];
+        const FILE_BASE_URL = '../uploads/chat_files/';
+        const PAGE_SIZE = 30;
 
-                function ic(el) {
-                    if (!el || !el.closest) return false;
-                    return !!(el.closest('.task-title') || el.closest('.task-desc-clamp') || el.closest('.task-meta-row') || el.closest('.modal-note-text') || el.closest('.task-tooltip') || el.closest('.info-task-title'));
-                }
-                document.addEventListener('contextmenu', function(e) {
-                    if (ie(e.target) || ic(e.target)) return true;
-                    e.preventDefault();
-                    return false;
-                }, true);
-                document.addEventListener('selectstart', function(e) {
-                    if (ie(e.target) || ic(e.target)) return true;
-                    e.preventDefault();
-                    return false;
-                }, true);
-                document.addEventListener('copy', function(e) {
-                    if (ie(e.target) || ic(e.target)) return true;
-                    e.preventDefault();
-                    return false;
-                }, true);
-                document.addEventListener('dragstart', function(e) {
-                    if (ie(e.target) || ic(e.target)) return true;
-                    e.preventDefault();
-                    return false;
-                }, true);
-                document.addEventListener('mousedown', function(e) {
-                    if (e.detail > 1 && !ie(e.target) && !ic(e.target)) {
-                        e.preventDefault();
-                        return false;
-                    }
-                }, true);
-            })();
+        const FILE_ICONS = {
+            'png': 'fa-file-image',
+            'jpg': 'fa-file-image',
+            'jpeg': 'fa-file-image',
+            'pdf': 'fa-file-pdf',
+            'zip': 'fa-file-archive',
+            'txt': 'fa-file-alt'
+        };
 
-        let appToastTimer = null;
+        /* ===================== STATE ===================== */
+        let selectedFile = null;
+        let currentChatUserId = null;
+        let currentIsSaved = false;
+        let currentIsBot = false;
+        let pollTimer = null;
+        let statusTimer = null;
+        let statusRequestInFlight = false;
+        let sendingMessage = false;
+        let lastRenderedDay = null;
+        let loadedMessageIds = new Set();
+        let firstLoadedMsgId = 0;
+        let lastLoadedMsgId = 0;
+        let hasMoreBefore = false;
+        let hasMoreAfter = false;
+        let loadingOlder = false;
+        let isAtBottom = true;
+        let pendingHighlightMsgId = null;
 
-        function showAppToast(text, type = 'success') {
-            const toast = document.getElementById('appToast');
-            if (!toast) return;
-            document.getElementById('appToastText').textContent = text;
-            const icon = toast.querySelector('i');
-            toast.classList.remove('toast-success', 'toast-error', 'toast-info');
-            if (type === 'success') {
-                icon.className = 'fas fa-check-circle';
-                toast.classList.add('toast-success');
-            } else if (type === 'error') {
-                icon.className = 'fas fa-exclamation-circle';
-                toast.classList.add('toast-error');
-            } else {
-                icon.className = 'fas fa-info-circle';
-                toast.classList.add('toast-info');
-            }
-            toast.classList.add('active');
-            clearTimeout(appToastTimer);
-            appToastTimer = setTimeout(() => toast.classList.remove('active'), 3000);
-        }
+        /* ===================== LIGHTBOX STATE ===================== */
+        let lightboxZoom = 1;
+        const ZOOM_MIN = 0.25,
+            ZOOM_MAX = 5,
+            ZOOM_STEP = 0.25;
+        let lightboxCurrentUrl = '',
+            lightboxCurrentName = '';
+        let lightboxPanX = 0,
+            lightboxPanY = 0;
+        let isDragging = false,
+            dragStartX = 0,
+            dragStartY = 0;
 
-        function setPersianDateInput(dId, hId, greg, wId) {
-            const d = document.getElementById(dId);
-            const h = document.getElementById(hId);
-            const w = document.getElementById(wId);
-            if (!d || !h) return;
-            if (!greg) {
-                d.value = '';
-                h.value = '';
-                if (w) w.classList.remove('has-value');
-                return;
-            }
-            try {
-                const p = greg.split('-');
-                if (p.length !== 3) throw new Error('bad');
-                const dt = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10), 12, 0, 0);
-                const pd = new persianDate(dt);
-                d.value = pd.format('YYYY/MM/DD');
-                h.value = greg;
-                if (w) w.classList.add('has-value');
-            } catch (e) {
-                d.value = '';
-                h.value = '';
-                if (w) w.classList.remove('has-value');
-            }
-        }
+        /* ===================== EDIT / DELETE WINDOW ===================== */
+        const EDIT_DELETE_WINDOW_MS = 60 * 60 * 1000;
+        let contextMenuMsgData = null;
+        let pendingDeleteMsgId = null;
+        let editingMsgId = null;
 
-        function clearPersianDate(prefix) {
-            setPersianDateInput(prefix + '_due_date_display', prefix + '_due_date', '', prefix + '_due_date_wrap');
-            const t = document.getElementById(prefix + '_due_time');
-            if (t) t.value = '';
-        }
+        /* ===================== SEARCH ===================== */
+        let searchScope = 'all';
+        let searchTimer = null;
+        let searchAbortController = null;
+        let lastSearchResults = [];
+        let searchInputTouched = false;
 
-        function initPersianDatePickers() {
-            if (!window.jQuery || !window.jQuery.fn || !window.jQuery.fn.persianDatepicker) return;
-            if (!window.persianDate) return;
-            const base = {
-                format: 'YYYY/MM/DD',
-                initialValue: false,
-                autoClose: true,
-                observer: true,
-                persianDigit: false,
-                toolbox: {
-                    calendarSwitch: {
-                        enabled: false
-                    },
-                    todayButton: {
-                        enabled: true,
-                        text: {
-                            fa: 'امروز'
-                        }
-                    },
-                    closeButton: {
-                        enabled: true,
-                        text: {
-                            fa: 'بستن'
-                        }
-                    }
-                },
-                navigator: {
-                    scroll: {
-                        enabled: false
-                    }
-                },
-                timePicker: {
-                    enabled: false
-                }
-            };
-            ['create', 'edit'].forEach(function(prefix) {
-                const dId = prefix + '_due_date_display';
-                const hId = prefix + '_due_date';
-                const wId = prefix + '_due_date_wrap';
-                window.jQuery('#' + dId).persianDatepicker(Object.assign({}, base, {
-                    altField: '#' + hId,
-                    altFieldFormatter: function(u) {
-                        const d = new Date(u);
-                        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-                    },
-                    onSelect: function() {
-                        setTimeout(function() {
-                            const el = document.getElementById(dId);
-                            const w = document.getElementById(wId);
-                            if (el && el.value && w) w.classList.add('has-value');
-                        }, 20);
-                    },
-                    onClear: function() {
-                        const h = document.getElementById(hId);
-                        if (h) h.value = '';
-                        const w = document.getElementById(wId);
-                        if (w) w.classList.remove('has-value');
-                    }
-                }));
-            });
-        }
-
-        function convertPersianDigitsInElement(el) {
-            if (!el) return;
-            const fa = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
-            const en = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
-            let n;
-            while ((n = walker.nextNode())) {
-                let t = n.nodeValue;
-                let ch = false;
-                for (let i = 0; i < 10; i++) {
-                    if (t.indexOf(fa[i]) !== -1) {
-                        t = t.split(fa[i]).join(en[i]);
-                        ch = true;
-                    }
-                }
-                if (ch) n.nodeValue = t;
-            }
-        }
-
-        function fixAllDatepickers() {
-            document.querySelectorAll('.datepicker-plot-area').forEach(convertPersianDigitsInElement);
-        }
-
-        function setupDatepickerDigitConversion() {
-            fixAllDatepickers();
-            const obs = new MutationObserver(function(muts) {
-                let needsFix = false;
-                muts.forEach(function(m) {
-                    if (m.type === 'childList') {
-                        m.addedNodes.forEach(function(node) {
-                            if (node.nodeType === 1) {
-                                if (node.classList && node.classList.contains('datepicker-plot-area')) needsFix = true;
-                                else if (node.querySelector && node.querySelector('.datepicker-plot-area')) needsFix = true;
-                                else if (node.closest && node.closest('.datepicker-plot-area')) needsFix = true;
-                            }
-                        });
-                    } else if (m.type === 'characterData') {
-                        if (m.target && m.target.parentElement && m.target.parentElement.closest && m.target.parentElement.closest('.datepicker-plot-area')) needsFix = true;
-                    }
-                });
-                if (needsFix) setTimeout(fixAllDatepickers, 0);
-            });
-            obs.observe(document.body, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-            document.addEventListener('click', function() {
-                setTimeout(fixAllDatepickers, 30);
-            }, true);
-            document.addEventListener('focusin', function() {
-                setTimeout(fixAllDatepickers, 30);
-            }, true);
-            document.addEventListener('mouseover', function(e) {
-                if (e.target && e.target.closest && e.target.closest('.datepicker-plot-area')) setTimeout(fixAllDatepickers, 0);
-            }, true);
-        }
-
-        function getLinkedProjectId(pickerId) {
-            if (pickerId === 'createAssigneePicker') {
-                const el = document.getElementById('createProjectInput');
-                return el ? (el.value || '') : '';
-            }
-            if (pickerId === 'editAssigneePicker') {
-                const el = document.getElementById('editProjectInput');
-                return el ? (el.value || '') : '';
-            }
-            return '';
-        }
-
-        function getAssigneeOptionsForProject(pid) {
-            const s = String(pid || '');
-            if (s !== '' && PROJECTS_MEMBERS && PROJECTS_MEMBERS[s] && PROJECTS_MEMBERS[s].length > 0) {
-                const l = PROJECTS_MEMBERS[s];
-                const t = (PROJECT_OPTIONS || []).find(p => String(p.id) === s)?.title || '';
-                return {
-                    mode: 'project',
-                    self: l.find(p => p.is_self) || null,
-                    others: l.filter(p => !p.is_self),
-                    projectTitle: t
-                };
-            }
-            return {
-                mode: 'colleagues',
-                self: ASSIGNEE_OPTIONS.self,
-                others: ASSIGNEE_OPTIONS.colleagues || [],
-                projectTitle: ''
-            };
-        }
-
-        function renderAssigneeDropdown(pickerId, selectedId) {
-            const picker = document.getElementById(pickerId);
-            if (!picker) return;
-            const dd = picker.querySelector('.assignee-picker__dropdown');
-            const pid = getLinkedProjectId(pickerId);
-            const o = getAssigneeOptionsForProject(pid);
-            let h = '';
-            if (o.mode === 'project') {
-                const tt = o.projectTitle ? ` «${escapeHtml(o.projectTitle)}»` : '';
-                h += `<div class="assignee-picker__section-label"><i class="fas fa-diagram-project" style="margin-left: 4px; color: #4c8bf5;"></i> اعضای پروژه${tt}</div>`;
-                if (o.self) h += renderAssigneeOption(o.self, selectedId);
-                o.others.forEach(c => {
-                    h += renderAssigneeOption(c, selectedId);
-                });
-                if (!o.self && o.others.length === 0) h += `<div class="assignee-picker__empty">این پروژه عضوی ندارد.</div>`;
-            } else {
-                h += `<div class="assignee-picker__section-label">خودم</div>`;
-                h += renderAssigneeOption(o.self, selectedId);
-                if (o.others.length > 0) {
-                    h += `<div class="assignee-picker__section-label">همکاران</div>`;
-                    o.others.forEach(c => {
-                        h += renderAssigneeOption(c, selectedId);
-                    });
-                } else {
-                    h += `<div class="assignee-picker__section-label">همکاران</div><div class="assignee-picker__empty">هنوز همکاری اضافه نکرده‌اید.<br><a href="../colleagues/index.php"><i class="fas fa-user-plus"></i> افزودن</a></div>`;
-                }
-            }
-            dd.innerHTML = h;
-            dd.querySelectorAll('.assignee-picker__option').forEach(opt => {
-                opt.addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    selectAssignee(pickerId, this.getAttribute('data-id'));
-                });
-            });
-        }
-
-        function renderAssigneeOption(p, sel) {
-            const isSel = String(p.id) === String(sel);
-            const avc = (p.is_self ? 'is-self' : '') + (p.is_creator ? ' is-creator' : '');
-            const scls = isSel ? 'selected' : '';
-            let ac = p.avatar_url ? `<img src="${escapeHtml(p.avatar_url)}" alt="">` : escapeHtml(p.initial || '?');
-            const crown = p.is_creator ? '<i class="fas fa-crown creator-crown"></i>' : '';
-            return `<div class="assignee-picker__option ${scls}" data-id="${p.id}"><div class="assignee-picker__option-avatar ${avc}">${ac}</div><div class="assignee-picker__option-info"><div class="assignee-picker__option-name">${escapeHtml(p.name)}${crown}</div>${p.mobile?`<div class="assignee-picker__option-mobile">${escapeHtml(p.mobile)}</div>`:''}</div></div>`;
-        }
-
-        function selectAssignee(pickerId, id) {
-            const picker = document.getElementById(pickerId);
-            if (!picker) return;
-            const input = picker.querySelector('input[type="hidden"]');
-            const av = picker.querySelector('.assignee-picker__avatar');
-            const name = picker.querySelector('.assignee-picker__name');
-            const mob = picker.querySelector('.assignee-picker__mobile');
-            let p = null;
-            if (String(ASSIGNEE_OPTIONS.self.id) === String(id)) p = ASSIGNEE_OPTIONS.self;
-            if (!p) p = (ASSIGNEE_OPTIONS.colleagues || []).find(c => String(c.id) === String(id));
-            if (!p && PROJECTS_MEMBERS)
-                for (const pid in PROJECTS_MEMBERS) {
-                    const f = PROJECTS_MEMBERS[pid].find(m => String(m.id) === String(id));
-                    if (f) {
-                        p = {
-                            id: f.id,
-                            name: f.is_self ? 'خودم' : f.name,
-                            mobile: f.mobile,
-                            initial: f.initial,
-                            avatar_url: f.avatar_url,
-                            is_self: f.is_self,
-                            is_creator: f.is_creator
-                        };
-                        break;
-                    }
-                }
-            if (!p) return;
-            input.value = p.id;
-            if (p.avatar_url) av.innerHTML = `<img src="${escapeHtml(p.avatar_url)}" alt="">`;
-            else av.textContent = p.initial || '?';
-            av.className = 'assignee-picker__avatar' + (p.is_self ? ' is-self' : '');
-            name.textContent = p.name;
-            mob.textContent = p.mobile || '';
-            picker.classList.remove('open');
-            renderAssigneeDropdown(pickerId, p.id);
-        }
-
-        function toggleAssigneePicker(pickerId) {
-            const picker = document.getElementById(pickerId);
-            if (!picker || picker.classList.contains('is-disabled')) return;
-            const wasOpen = picker.classList.contains('open');
-            document.querySelectorAll('.assignee-picker.open, .project-picker.open').forEach(p => p.classList.remove('open'));
-            if (!wasOpen) {
-                renderAssigneeDropdown(pickerId, picker.querySelector('input[type="hidden"]').value);
-                picker.classList.add('open');
-            }
-        }
-
-        function renderProjectDropdown(pickerId, selectedId) {
-            const picker = document.getElementById(pickerId);
-            if (!picker) return;
-            const dd = picker.querySelector('.project-picker__dropdown');
-            const projects = PROJECT_OPTIONS || [];
-            let h = `<div class="project-picker__section-label">بدون پروژه</div>`;
-            h += renderProjectOption({
-                id: '',
-                title: 'بدون پروژه',
-                initial: '',
-                image_url: null
-            }, selectedId, true);
-            if (projects.length > 0) {
-                h += `<div class="project-picker__section-label">پروژه‌های من</div>`;
-                projects.forEach(p => {
-                    h += renderProjectOption(p, selectedId, false);
-                });
-            } else {
-                h += `<div class="project-picker__section-label">پروژه‌های من</div><div class="project-picker__empty">هنوز پروژه‌ای نساخته‌اید.</div>`;
-            }
-            dd.innerHTML = h;
-            dd.querySelectorAll('.project-picker__option').forEach(opt => {
-                opt.addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    selectProject(pickerId, this.getAttribute('data-id'));
-                });
-            });
-        }
-
-        function renderProjectOption(p, sel, isEmpty) {
-            const curId = (sel === null || sel === undefined || sel === '') ? '' : String(sel);
-            const isSel = (isEmpty ? '' : String(p.id)) === curId;
-            const scls = isSel ? 'selected' : '';
-            let ac, avc = '';
-            if (isEmpty) {
-                ac = '<i class="fas fa-folder-open"></i>';
-                avc = 'is-empty';
-            } else if (p.image_url) ac = `<img src="${escapeHtml(p.image_url)}" alt="">`;
-            else ac = escapeHtml(p.initial || '?');
-            return `<div class="project-picker__option ${scls}" data-id="${isEmpty?'':p.id}"><div class="project-picker__option-avatar ${avc}">${ac}</div><div class="project-picker__option-info"><div class="project-picker__option-name">${escapeHtml(p.title)}</div>${!isEmpty&&p.is_creator?`<div class="project-picker__option-mobile">سازنده</div>`:''}</div></div>`;
-        }
-
-        function selectProject(pickerId, id, options = {}) {
-            const {
-                skipAssigneeReset = false
-            } = options;
-            const picker = document.getElementById(pickerId);
-            if (!picker) return;
-            const input = picker.querySelector('input[type="hidden"]');
-            const av = picker.querySelector('.project-picker__avatar');
-            const name = picker.querySelector('.project-picker__name');
-            const meta = picker.querySelector('.project-picker__mobile');
-            if (id === '' || id === null) {
-                input.value = '';
-                av.innerHTML = '<i class="fas fa-folder-open"></i>';
-                av.className = 'project-picker__avatar is-empty';
-                name.textContent = 'بدون پروژه';
-                meta.textContent = '—';
-                picker.classList.remove('open');
-                renderProjectDropdown(pickerId, '');
-                if (!skipAssigneeReset) {
-                    if (pickerId === 'createProjectPicker') resetAssigneeForProject('createAssigneePicker');
-                    else if (pickerId === 'editProjectPicker') resetAssigneeForProject('editAssigneePicker');
-                }
-                return;
-            }
-            const p = (PROJECT_OPTIONS || []).find(x => String(x.id) === String(id));
-            if (!p) return;
-            input.value = p.id;
-            if (p.image_url) av.innerHTML = `<img src="${escapeHtml(p.image_url)}" alt="">`;
-            else av.textContent = p.initial || '?';
-            av.className = 'project-picker__avatar';
-            name.textContent = p.title;
-            meta.textContent = p.is_creator ? 'سازنده پروژه' : 'عضو پروژه';
-            picker.classList.remove('open');
-            renderProjectDropdown(pickerId, p.id);
-            if (!skipAssigneeReset) {
-                if (pickerId === 'createProjectPicker') resetAssigneeForProject('createAssigneePicker');
-                else if (pickerId === 'editProjectPicker') resetAssigneeForProject('editAssigneePicker');
-            }
-        }
-
-        function resetAssigneeForProject(apid) {
-            const pid = getLinkedProjectId(apid);
-            const o = getAssigneeOptionsForProject(pid);
-            let n = null;
-            if (o.self && String(o.self.id) === String(CURRENT_USER_ID)) n = CURRENT_USER_ID;
-            else if (o.self) n = o.self.id;
-            else if (o.others.length > 0) n = o.others[0].id;
-            else n = CURRENT_USER_ID;
-            selectAssignee(apid, n);
-        }
-
-        function toggleProjectPicker(pickerId) {
-            const picker = document.getElementById(pickerId);
-            if (!picker || picker.classList.contains('is-disabled')) return;
-            const wasOpen = picker.classList.contains('open');
-            document.querySelectorAll('.assignee-picker.open, .project-picker.open').forEach(p => p.classList.remove('open'));
-            if (!wasOpen) {
-                renderProjectDropdown(pickerId, picker.querySelector('input[type="hidden"]').value);
-                picker.classList.add('open');
-            }
-        }
-
-        document.addEventListener('click', function(e) {
-            if (!e.target.closest('.assignee-picker')) document.querySelectorAll('.assignee-picker.open').forEach(p => p.classList.remove('open'));
-            if (!e.target.closest('.project-picker')) document.querySelectorAll('.project-picker.open').forEach(p => p.classList.remove('open'));
-            const mp = document.getElementById('modalNoteMentionPicker');
-            if (mp && mp.style.display !== 'none' && !e.target.closest('#modalNoteMentionPicker') && !e.target.closest('#modalNoteMentionBtn')) mp.style.display = 'none';
-        });
-
-        function switchMainTab(t, b) {
-            document.querySelectorAll('.main-tab-content').forEach(el => el.classList.remove('active'));
-            document.querySelectorAll('.main-tab-btn').forEach(el => el.classList.remove('active'));
-            const t2 = document.getElementById('main-tab-' + t);
-            if (t2) t2.classList.add('active');
-            b.classList.add('active');
-        }
-
-        function switchTab(t, b) {
-            const mc = b.closest('.main-tab-content');
-            if (mc) {
-                mc.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-                mc.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-                const t2 = mc.querySelector('#tab-' + t);
-                if (t2) t2.classList.add('active');
-            }
-            b.classList.add('active');
-        }
-        async function refreshTaskList() {
-            try {
-                const url = window.location.pathname + window.location.search;
-                const res = await fetch(url, {
-                    headers: {
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    cache: 'no-store'
-                });
-                const html = await res.text();
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(html, 'text/html');
-                const nc = doc.querySelector('.content-area');
-                const cc = document.querySelector('.content-area');
-                if (nc && cc) {
-                    cc.innerHTML = nc.innerHTML;
-                    bindAjaxForms();
-                }
-            } catch (e) {
-                console.error(e);
-            }
-        }
-
-        function toggleTask(id) {
-            const row = document.getElementById('task-row-' + id);
-            if (row) row.classList.add('animating');
-            const fd = new FormData();
-            fd.append('toggle', id);
-            fd.append('csrf_token', CSRF_TOKEN);
-            fetch('index.php?page=list', {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: fd
-            }).then(r => r.text()).then(text => {
-                try {
-                    return JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-            }).then(async data => {
-                if (data.status === 'error') {
-                    alert(data.message || 'دسترسی ندارید');
-                    if (row) row.classList.remove('animating');
-                    return;
-                }
-                showAppToast('وضعیت به‌روز شد', 'success');
-                await refreshTaskList();
-            }).catch(() => {
-                if (row) row.classList.remove('animating');
-            });
-        }
-
-        function handleTaskRowClick(row) {
-            if (row.getAttribute('data-can-open') !== '1') return;
-            try {
-                openEditModal(JSON.parse(row.getAttribute('data-task')), row.getAttribute('data-can-edit') === '1', row.getAttribute('data-can-reassign') === '1', row.getAttribute('data-can-change-project') === '1', row.getAttribute('data-can-complete') === '1');
-            } catch (e) {
-                console.error(e);
-            }
-        }
-
-        function openInfoModalFromRow(taskId) {
-            const row = document.getElementById('task-row-' + taskId);
-            if (!row) return;
-            try {
-                openInfoModal(JSON.parse(row.getAttribute('data-task')));
-            } catch (e) {}
-        }
-
-        function openInfoModal(task) {
-            document.getElementById('info_task_title').textContent = task.title || '—';
-            const pc = document.getElementById('info_project');
-            if (task.project_title) {
-                const th = task.project_image_url ? `<img src="${escapeHtml(task.project_image_url)}" alt="">` : escapeHtml(task.project_initial || '?');
-                pc.innerHTML = `<span class="info-project-cell"><span class="info-project-thumb">${th}</span><span>${escapeHtml(task.project_title)}</span></span>`;
-            } else pc.innerHTML = `<span class="info-project-cell"><span class="info-project-thumb is-empty"><i class="fas fa-folder-open"></i></span><span style="color: var(--text-soft);">بدون پروژه</span></span>`;
-            const sc = document.getElementById('info_subject');
-            if (task.subject_title) sc.innerHTML = `<span class="info-subject-badge"><i class="fas fa-tag"></i>${escapeHtml(task.subject_title)}</span>`;
-            else sc.innerHTML = `<span style="color: var(--text-soft);">بدون موضوع</span>`;
-            document.getElementById('info_priority').innerHTML = `<span class="info-priority-badge ${escapeHtml(task.priority||'medium')}">${escapeHtml(task.priority_label||task.priority||'—')}</span>`;
-            document.getElementById('info_assignee').textContent = task.assignee_name || '—';
-            document.getElementById('info_creator').textContent = task.creator_name || '—';
-            const de = document.getElementById('info_due');
-            let dt = task.due_date || '';
-            if (task.due_time_raw) dt += ' - ' + task.due_time_raw;
-            if (dt) {
-                if (task.is_overdue) de.innerHTML = `<span style="color: #c81e4a; font-weight: 700;">${escapeHtml(dt)} <span class="overdue-badge"><i class="fas fa-exclamation-triangle"></i> تاخیر</span></span>`;
-                else de.textContent = dt;
-            } else de.textContent = 'بدون مهلت';
-            const ac = parseInt(task.attachments_count || 0, 10);
-            document.getElementById('info_attachments').innerHTML = ac > 0 ? `<span class="info-subject-badge"><i class="fas fa-paperclip"></i> ${toPersianDigits(ac)} فایل</span>` : `<span style="color: var(--text-soft);">بدون فایل</span>`;
-            openModal('taskInfoModal');
-        }
-
-        function openModal(id) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.classList.add('active');
-            document.body.style.overflow = 'hidden';
-            if (id === 'createTaskModal') {
-                document.getElementById('createAssigneeInput').value = CURRENT_USER_ID;
-                const av = document.getElementById('createAssigneeAvatar');
-                if (ASSIGNEE_OPTIONS.self.avatar_url) av.innerHTML = `<img src="${escapeHtml(ASSIGNEE_OPTIONS.self.avatar_url)}" alt="">`;
-                else av.textContent = ASSIGNEE_OPTIONS.self.initial || '?';
-                av.className = 'assignee-picker__avatar is-self';
-                document.getElementById('createAssigneeName').textContent = 'خودم';
-                document.getElementById('createAssigneeMobile').textContent = ASSIGNEE_OPTIONS.self.mobile || '';
-                document.getElementById('createProjectInput').value = '';
-                const pv = document.getElementById('createProjectAvatar');
-                pv.innerHTML = '<i class="fas fa-folder-open"></i>';
-                pv.className = 'project-picker__avatar is-empty';
-                document.getElementById('createProjectName').textContent = 'بدون پروژه';
-                document.getElementById('createProjectMeta').textContent = '—';
-                renderAssigneeDropdown('createAssigneePicker', CURRENT_USER_ID);
-                setPersianDateInput('create_due_date_display', 'create_due_date', '', 'create_due_date_wrap');
-                const t = document.getElementById('create_due_time');
-                if (t) t.value = '';
-                const cf = document.getElementById('createFileInput');
-                if (cf) cf.value = '';
-                renderFilePreview('createFileInput', 'createFilePreviewList');
-            }
-        }
-
-        function closeModal(id) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.classList.remove('active');
-            document.body.style.overflow = '';
-        }
-        let editFormInitialState = null;
-
-        function captureEditFormState() {
-            const s = {};
-            s.title = (document.getElementById('edit_task_title') || {}).value || '';
-            s.desc = (document.getElementById('edit_task_desc') || {}).value || '';
-            s.subject = (document.getElementById('edit_subject_id') || {}).value || '';
-            const pr = document.querySelector('#editTaskModal input[name="priority"]:checked');
-            s.priority = pr ? pr.value : '';
-            s.project = (document.getElementById('editProjectInput') || {}).value || '';
-            s.assignee = (document.getElementById('editAssigneeInput') || {}).value || '';
-            s.due = (document.getElementById('edit_due_date') || {}).value || '';
-            s.dueTime = (document.getElementById('edit_due_time') || {}).value || '';
-            return JSON.stringify(s);
-        }
-
-        function hasEditFormChanged() {
-            return editFormInitialState ? captureEditFormState() !== editFormInitialState : false;
-        }
-
-        function requestCloseEditModal() {
-            if (hasEditFormChanged()) {
-                const sb = document.getElementById('edit_submit_btn');
-                const showSave = sb && sb.style.display !== 'none';
-                const sci = document.getElementById('confirmCloseSave');
-                if (sci) sci.style.display = showSave ? '' : 'none';
-                openModal('confirmCloseModal');
-            } else closeModal('editTaskModal');
-        }
-
-        function forceCloseEditModal() {
-            closeModal('confirmCloseModal');
-            closeModal('editTaskModal');
-            editFormInitialState = null;
-        }
-
-        function saveAndCloseEditModal() {
-            closeModal('confirmCloseModal');
-            const sb = document.getElementById('edit_submit_btn');
-            if (sb && sb.style.display !== 'none') sb.click();
-            else {
-                closeModal('editTaskModal');
-                editFormInitialState = null;
-            }
-        }
-
-        function openEditModal(task, canEdit, canReassign, canChangeProject, canComplete) {
-            document.getElementById('edit_task_id').value = task.id;
-            document.getElementById('edit_id_badge').textContent = '#' + task.id;
-            document.getElementById('edit_task_title').value = task.title;
-            document.getElementById('edit_subject_id').value = task.subject_id || '';
-            document.getElementById('edit_task_desc').value = task.description || '';
-            setPersianDateInput('edit_due_date_display', 'edit_due_date', task.due_date_raw || '', 'edit_due_date_wrap');
-            const t = document.getElementById('edit_due_time');
-            if (t) t.value = (task.due_time_raw || '').substring(0, 5);
-            document.querySelectorAll('#editTaskModal input[name="priority"]').forEach(r => {
-                r.checked = (r.value === task.priority);
-            });
-            ['edit_task_title', 'edit_subject_id', 'edit_task_desc'].forEach(id => {
-                const el = document.getElementById(id);
-                if (!el) return;
-                if (canEdit) {
-                    el.disabled = false;
-                    el.classList.remove('field-locked');
-                } else {
-                    el.disabled = true;
-                    el.classList.add('field-locked');
-                }
-            });
-            const dw = document.getElementById('edit_due_date_wrap');
-            const dd = document.getElementById('edit_due_date_display');
-            const dtl = document.getElementById('edit_due_time');
-            if (dd) {
-                if (canEdit) {
-                    dd.classList.remove('field-locked');
-                    if (dw) dw.style.pointerEvents = '';
-                    if (dtl) {
-                        dtl.disabled = false;
-                        dtl.classList.remove('field-locked');
-                    }
-                } else {
-                    dd.classList.add('field-locked');
-                    if (dw) dw.style.pointerEvents = 'none';
-                    if (dtl) {
-                        dtl.disabled = true;
-                        dtl.classList.add('field-locked');
-                    }
-                }
-            }
-            document.querySelectorAll('#editTaskModal input[name="priority"]').forEach(r => {
-                r.disabled = !canEdit;
-            });
-            const pg = document.getElementById('edit_priority_group');
-            if (canEdit) pg.classList.remove('field-locked');
-            else pg.classList.add('field-locked');
-            selectProject('editProjectPicker', task.project_id ? String(task.project_id) : '', {
-                skipAssigneeReset: true
-            });
-            selectAssignee('editAssigneePicker', task.assignee_id ? String(task.assignee_id) : String(CURRENT_USER_ID));
-            const ap = document.getElementById('editAssigneePicker');
-            if (canReassign) ap.classList.remove('is-disabled');
-            else ap.classList.add('is-disabled');
-            const pp = document.getElementById('editProjectPicker');
-            if (canChangeProject) pp.classList.remove('is-disabled');
-            else pp.classList.add('is-disabled');
-            const sb = document.getElementById('edit_submit_btn');
-            if (sb) sb.style.display = (canEdit || canReassign || canChangeProject) ? '' : 'none';
-            const ef = document.getElementById('editFileInput');
-            if (ef) ef.value = '';
-            renderFilePreview('editFileInput', 'editFilePreviewList');
-            const nfi = document.getElementById('modalNoteFileInput');
-            if (nfi) nfi.value = '';
-            const nt = document.getElementById('modalNoteText');
-            if (nt) nt.value = '';
-            renderNoteFilePreview();
-            currentMentions = [];
-            renderMentionsPreview();
-            const mp = document.getElementById('modalNoteMentionPicker');
-            if (mp) mp.style.display = 'none';
-            loadTaskAttachments(task.id);
-            loadModalNotes(task.id);
-            openModal('editTaskModal');
-            setTimeout(() => {
-                editFormInitialState = captureEditFormState();
-            }, 80);
-        }
-
-        function copyTaskLink() {
-            const tid = document.getElementById('edit_task_id').value;
-            if (!tid) return;
-            const btn = document.getElementById('edit_share_btn');
-            if (btn) btn.classList.add('copied');
-            fetch('index.php?get_task_token=' + encodeURIComponent(tid), {
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status !== 'success') {
-                    showAppToast(d.message || 'خطا', 'error');
-                    if (btn) btn.classList.remove('copied');
-                    return;
-                }
-                const url = new URL(d.url, window.location.href).href;
-                const done = () => {
-                    showAppToast('لینک کپی شد', 'success');
-                    setTimeout(() => {
-                        if (btn) btn.classList.remove('copied');
-                    }, 1500);
-                };
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(url).then(done).catch(() => {
-                        fallbackCopyText(url);
-                        done();
-                    });
-                } else {
-                    fallbackCopyText(url);
-                    done();
-                }
-            }).catch(() => {
-                showAppToast('خطا', 'error');
-                if (btn) btn.classList.remove('copied');
-            });
-        }
-
-        function fallbackCopyText(t) {
-            try {
-                const ta = document.createElement('textarea');
-                ta.value = t;
-                ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
-                document.body.appendChild(ta);
-                ta.focus();
-                ta.select();
-                document.execCommand('copy');
-                document.body.removeChild(ta);
-            } catch (e) {}
-        }
-
-        function fileIconClass(n) {
-            const e = (n.split('.').pop() || '').toLowerCase();
-            if (e === 'pdf') return {
-                cls: 'is-pdf',
-                icon: 'fa-file-pdf'
-            };
-            if (['xls', 'xlsx', 'csv'].includes(e)) return {
-                cls: 'is-excel',
-                icon: 'fa-file-excel'
-            };
-            if (['doc', 'docx', 'rtf', 'txt'].includes(e)) return {
-                cls: 'is-word',
-                icon: 'fa-file-word'
-            };
-            if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(e)) return {
-                cls: 'is-image',
-                icon: 'fa-file-image'
-            };
-            if (['zip', 'rar', '7z'].includes(e)) return {
-                cls: 'is-zip',
-                icon: 'fa-file-zipper'
-            };
-            return {
-                cls: '',
-                icon: 'fa-file'
-            };
-        }
-
-        function humanFileSizeJS(b) {
-            b = parseInt(b, 10) || 0;
-            if (b < 1024) return b + ' بایت';
-            if (b < 1048576) return (b / 1024).toFixed(1) + ' کیلوبایت';
-            return (b / 1048576).toFixed(2) + ' مگابایت';
-        }
-
-        function renderFilePreview(iid, lid) {
-            const input = document.getElementById(iid);
-            const list = document.getElementById(lid);
-            if (!input || !list) return;
-            list.innerHTML = '';
-            Array.from(input.files || []).forEach((f, idx) => {
-                const {
-                    cls,
-                    icon
-                } = fileIconClass(f.name);
-                const li = document.createElement('li');
-                li.className = 'file-preview-item';
-                li.innerHTML = `<div class="file-preview-item__icon ${cls}"><i class="fas ${icon}"></i></div><div class="file-preview-item__info"><div class="file-preview-item__name">${escapeHtml(f.name)}</div><div class="file-preview-item__meta">${humanFileSizeJS(f.size)}</div></div><button type="button" class="file-preview-item__remove" data-idx="${idx}"><i class="fas fa-times"></i></button>`;
-                list.appendChild(li);
-            });
-            list.querySelectorAll('.file-preview-item__remove').forEach(b => {
-                b.addEventListener('click', function() {
-                    removeFileFromInput(iid, parseInt(this.getAttribute('data-idx'), 10));
-                });
-            });
-        }
-
-        function removeFileFromInput(iid, idx) {
-            const input = document.getElementById(iid);
-            if (!input) return;
-            const dt = new DataTransfer();
-            Array.from(input.files || []).forEach((f, i) => {
-                if (i !== idx) dt.items.add(f);
-            });
-            input.files = dt.files;
-            renderFilePreview(iid, iid === 'createFileInput' ? 'createFilePreviewList' : 'editFilePreviewList');
-        }
-
-        function setupDropZone(zid, iid, lid) {
-            const z = document.getElementById(zid);
-            const i = document.getElementById(iid);
-            if (!z || !i) return;
-            ['dragenter', 'dragover'].forEach(ev => {
-                z.addEventListener(ev, e => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    z.classList.add('dragover');
-                });
-            });
-            ['dragleave', 'drop'].forEach(ev => {
-                z.addEventListener(ev, e => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    z.classList.remove('dragover');
-                });
-            });
-            z.addEventListener('drop', e => {
-                const dt = e.dataTransfer;
-                if (!dt || !dt.files || !dt.files.length) return;
-                const n = new DataTransfer();
-                Array.from(i.files || []).forEach(f => n.items.add(f));
-                Array.from(dt.files).forEach(f => n.items.add(f));
-                i.files = n.files;
-                renderFilePreview(iid, lid);
-            });
-        }
-
-        function loadTaskAttachments(tid) {
-            const c = document.getElementById('modalAttachmentsList');
-            const ce = document.getElementById('modalAttachmentsCount');
-            if (!c) return;
-            c.innerHTML = '<div class="modal-attachments-loading">در حال بارگذاری...</div>';
-            fetch('index.php?get_attachments=1&task_id=' + encodeURIComponent(tid), {
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status !== 'success') {
-                    c.innerHTML = `<div class="modal-attachments-empty">${escapeHtml(d.message||'خطا')}</div>`;
-                    return;
-                }
-                const a = d.attachments || [];
-                if (ce) ce.textContent = toPersianDigits(a.length);
-                if (a.length === 0) {
-                    c.innerHTML = '<div class="modal-attachments-empty">هنوز فایلی بارگذاری نشده.</div>';
-                    return;
-                }
-                let h = '';
-                a.forEach(x => {
-                    const iC = x.icon || 'fa-file';
-                    let cc = '';
-                    if (iC.includes('pdf')) cc = 'is-pdf';
-                    else if (iC.includes('excel')) cc = 'is-excel';
-                    else if (iC.includes('word')) cc = 'is-word';
-                    else if (iC.includes('image')) cc = 'is-image';
-                    else if (iC.includes('zipper')) cc = 'is-zip';
-                    h += `<div class="modal-attachment-item"><div class="modal-attachment-item__icon ${cc}"><i class="fas ${escapeHtml(iC)}"></i></div><div class="modal-attachment-item__body"><div class="modal-attachment-item__name"><a href="${escapeHtml(x.url)}" target="_blank" rel="noopener" download>${escapeHtml(x.file_name)}</a></div><div class="modal-attachment-item__meta"><span><i class="fas fa-hdd"></i> ${escapeHtml(x.file_size_human||'')}</span><span><i class="fas fa-clock"></i> ${escapeHtml(x.persian_date||'')}</span></div></div><div class="modal-attachment-item__actions"><a class="att-download" href="${escapeHtml(x.url)}" target="_blank" rel="noopener" download><i class="fas fa-download"></i></a><button type="button" class="att-delete" onclick="deleteTaskAttachment(${x.id}, ${tid})"><i class="fas fa-trash-alt"></i></button></div></div>`;
-                });
-                c.innerHTML = h;
-            }).catch(() => {
-                c.innerHTML = '<div class="modal-attachments-empty">خطا</div>';
-            });
-        }
-
-        function deleteTaskAttachment(aid, tid) {
-            if (!confirm('حذف شود؟')) return;
-            const fd = new FormData();
-            fd.append('delete_attachment', '1');
-            fd.append('attachment_id', aid);
-            fd.append('csrf_token', CSRF_TOKEN);
-            fetch('index.php', {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: fd
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status === 'success') loadTaskAttachments(tid);
-            }).catch(() => alert('خطا'));
-        }
-
-        function renderNoteFilePreview() {
-            const i = document.getElementById('modalNoteFileInput');
-            const p = document.getElementById('modalNoteFilesPreview');
-            const ab = document.querySelector('label.modal-note-attach-btn');
-            if (!i || !p) return;
-            p.innerHTML = '';
-            const files = Array.from(i.files || []);
-            if (ab) {
-                if (files.length > 0) ab.classList.add('has-files');
-                else ab.classList.remove('has-files');
-            }
-            files.forEach((f, idx) => {
-                const {
-                    cls,
-                    icon
-                } = fileIconClass(f.name);
-                const it = document.createElement('div');
-                it.className = 'modal-note-file-item';
-                it.innerHTML = `<div class="modal-note-file-item__icon ${cls}"><i class="fas ${icon}"></i></div><div class="modal-note-file-item__info"><div class="modal-note-file-item__name">${escapeHtml(f.name)}</div><div class="modal-note-file-item__meta">${humanFileSizeJS(f.size)}</div></div><button type="button" class="modal-note-file-item__remove" data-idx="${idx}"><i class="fas fa-times"></i></button>`;
-                p.appendChild(it);
-            });
-            p.querySelectorAll('.modal-note-file-item__remove').forEach(b => {
-                b.addEventListener('click', function() {
-                    const idx = parseInt(this.getAttribute('data-idx'), 10);
-                    const dt = new DataTransfer();
-                    Array.from(i.files || []).forEach((f, j) => {
-                        if (j !== idx) dt.items.add(f);
-                    });
-                    i.files = dt.files;
-                    renderNoteFilePreview();
-                });
-            });
-        }
-        let currentMentions = [];
-
-        function toggleMentionPicker(e) {
-            if (e) {
-                e.stopPropagation();
-                e.preventDefault();
-            }
-            const p = document.getElementById('modalNoteMentionPicker');
-            if (!p) return;
-            if (p.style.display === 'none' || !p.style.display) {
-                renderMentionPicker();
-                p.style.display = 'flex';
-            } else p.style.display = 'none';
-        }
-
-        function renderMentionPicker() {
-            const l = document.getElementById('mentionPickerList');
-            if (!l) return;
-            const o = MENTION_OPTIONS || [];
-            if (o.length === 0) {
-                l.innerHTML = '<div class="mention-picker__empty">هیچ همکاری نیست</div>';
-                return;
-            }
-            let h = '';
-            o.forEach(x => {
-                const s = currentMentions.some(m => m.id === x.id);
-                const av = x.avatar_url ? `<img src="${escapeHtml(x.avatar_url)}" alt="">` : escapeHtml(x.initial || '?');
-                h += `<div class="mention-picker__item ${s?'selected':''}" data-id="${x.id}" data-name="${escapeHtml(x.name)}"><div class="mention-picker__avatar">${av}</div><div class="mention-picker__name">${escapeHtml(x.name)}</div>${s?'<i class="fas fa-check mention-picker__check"></i>':''}</div>`;
-            });
-            l.innerHTML = h;
-            l.querySelectorAll('.mention-picker__item').forEach(el => {
-                el.addEventListener('click', function(ev) {
-                    ev.stopPropagation();
-                    toggleMention(parseInt(this.getAttribute('data-id'), 10), this.getAttribute('data-name'));
-                });
-            });
-        }
-
-        function toggleMention(id, name) {
-            const idx = currentMentions.findIndex(m => m.id === id);
-            const ta = document.getElementById('modalNoteText');
-            if (idx >= 0) {
-                currentMentions.splice(idx, 1);
-                if (ta) {
-                    const re = new RegExp('@' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s?', 'g');
-                    ta.value = ta.value.replace(re, '');
-                }
-            } else {
-                currentMentions.push({
-                    id,
-                    name
-                });
-                if (ta) {
-                    const pos = ta.selectionStart || ta.value.length;
-                    const b = ta.value.substring(0, pos);
-                    const a = ta.value.substring(pos);
-                    const pfx = (b && !b.endsWith(' ') && !b.endsWith('\n')) ? ' ' : '';
-                    const ins = pfx + '@' + name + ' ';
-                    ta.value = b + ins + a;
-                    try {
-                        ta.setSelectionRange(b.length + ins.length, b.length + ins.length);
-                    } catch (e) {}
-                    ta.focus();
-                }
-            }
-            renderMentionsPreview();
-            renderMentionPicker();
-        }
-
-        function renderMentionsPreview() {
-            const p = document.getElementById('modalNoteMentionsPreview');
-            const b = document.getElementById('modalNoteMentionBtn');
-            if (!p) return;
-            p.innerHTML = '';
-            if (currentMentions.length === 0) {
-                if (b) b.classList.remove('has-mentions');
-                return;
-            }
-            if (b) b.classList.add('has-mentions');
-            currentMentions.forEach(m => {
-                const o = (MENTION_OPTIONS || []).find(x => x.id === m.id);
-                const av = (o && o.avatar_url) ? `<img src="${escapeHtml(o.avatar_url)}" alt="">` : escapeHtml((o && o.initial) || m.name.charAt(0) || '?');
-                const c = document.createElement('div');
-                c.className = 'mention-chip';
-                c.innerHTML = `<span class="mention-chip__avatar">${av}</span><span>${escapeHtml(m.name)}</span><button type="button" class="mention-chip__remove"><i class="fas fa-times"></i></button>`;
-                c.querySelector('.mention-chip__remove').addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    toggleMention(m.id, m.name);
-                });
-                p.appendChild(c);
-            });
-        }
-        let notesAddInProgress = false;
-
-        function loadModalNotes(tid) {
-            const c = document.getElementById('modalNotesList');
-            if (!c) return;
-            c.innerHTML = '<p class="modal-notes-empty">در حال بارگذاری...</p>';
-            fetch('index.php?get_notes=1&task_id=' + encodeURIComponent(tid), {
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status !== 'success') {
-                    c.innerHTML = `<p class="modal-notes-empty">${escapeHtml(d.message||'خطا')}</p>`;
-                    return;
-                }
-                const n = d.notes || [];
-                const ce = document.getElementById('modalNotesCount');
-                if (ce) ce.textContent = toPersianDigits(n.length);
-                if (n.length === 0) {
-                    c.innerHTML = '<p class="modal-notes-empty">هنوز گزارشی ثبت نشده.</p>';
-                    return;
-                }
-                let h = '';
-                n.forEach(x => {
-                    h += renderModalNote(x);
-                });
-                c.innerHTML = h;
-            }).catch(() => {
-                c.innerHTML = '<p class="modal-notes-empty">خطا</p>';
-            });
-        }
-
-        function renderModalNote(note) {
-            const isMine = !!note.is_mine || Number(note.user_id) === CURRENT_USER_ID;
-            const an = ((note.first_name || '') + ' ' + (note.last_name || '')).trim() || note.mobile || 'کاربر';
-            const al = isMine ? 'من' : an;
-            const ini = (note.first_name || note.mobile || '?').trim().charAt(0);
-            const ds = note.persian_date || note.created_at || '';
-            let ah = '';
-            const at = note.attachments || [];
-            if (at.length > 0) {
-                let it = '';
-                at.forEach(a => {
-                    const iC = a.icon || 'fa-file';
-                    let cc = '';
-                    if (iC.includes('pdf')) cc = 'is-pdf';
-                    else if (iC.includes('excel')) cc = 'is-excel';
-                    else if (iC.includes('word')) cc = 'is-word';
-                    else if (iC.includes('image')) cc = 'is-image';
-                    else if (iC.includes('zipper')) cc = 'is-zip';
-                    it += `<div class="modal-note-attachment"><div class="modal-note-attachment__icon ${cc}"><i class="fas ${escapeHtml(iC)}"></i></div><a class="modal-note-attachment__body" href="${escapeHtml(a.url)}" target="_blank" rel="noopener" download><div class="modal-note-attachment__name">${escapeHtml(a.file_name)}</div><div class="modal-note-attachment__meta">${escapeHtml(a.file_size_human||'')}</div></a><div class="modal-note-attachment__actions"><a class="att-download" href="${escapeHtml(a.url)}" target="_blank" rel="noopener" download><i class="fas fa-download"></i></a><button type="button" class="att-del" onclick="deleteNoteAttachment(${a.id}, ${note.id})"><i class="fas fa-trash-alt"></i></button></div></div>`;
-                });
-                ah = `<div class="modal-note-attachments">${it}</div>`;
-            }
-            let nth = escapeHtml(note.note);
-            if (MENTION_OPTIONS && MENTION_OPTIONS.length) {
-                MENTION_OPTIONS.forEach(o => {
-                    const nm = o.name;
-                    if (!nm) return;
-                    const safe = nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const re = new RegExp('@' + safe + '(?=\\s|$)', 'g');
-                    nth = nth.replace(re, '<span class="note-mention">@' + escapeHtml(nm) + '</span>');
-                });
-            }
-            return `<div class="modal-note-item" data-note-id="${note.id}"><div class="modal-note-avatar ${isMine?'is-mine':''}">${escapeHtml(ini)}</div><div class="modal-note-body"><div class="modal-note-header"><span class="modal-note-author ${isMine?'is-mine':''}">${escapeHtml(al)}</span><span class="modal-note-date">${escapeHtml(ds)}</span></div><div class="modal-note-text">${nth}</div>${ah}<div class="modal-note-actions">${isMine?`<button type="button" class="modal-note-edit" onclick="startEditNote(${note.id})"><i class="fas fa-pen"></i></button>`:''}<button type="button" class="modal-note-delete" onclick="deleteModalNote(${note.id})"><i class="fas fa-trash-alt"></i></button></div></div></div>`;
-        }
-
-        function deleteNoteAttachment(aid, nid) {
-            if (!confirm('حذف شود؟')) return;
-            const fd = new FormData();
-            fd.append('delete_note_attachment', '1');
-            fd.append('attachment_id', aid);
-            fd.append('csrf_token', CSRF_TOKEN);
-            fetch('index.php', {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: fd
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status === 'success') {
-                    const t = document.getElementById('edit_task_id').value;
-                    if (t) loadModalNotes(t);
-                }
-            }).catch(() => alert('خطا'));
-        }
-
-        function submitModalNote() {
-            if (notesAddInProgress) return;
-            const tid = document.getElementById('edit_task_id').value;
-            const ta = document.getElementById('modalNoteText');
-            const fi = document.getElementById('modalNoteFileInput');
-            const nt = (ta.value || '').trim();
-            const hf = fi && fi.files && fi.files.length > 0;
-            const hm = currentMentions.length > 0;
-            if (!tid || tid === '0') {
-                alert('ابتدا وظیفه ذخیره شود.');
-                return;
-            }
-            if (!nt && !hf) {
-                alert('متن یا فایل وارد کنید.');
-                return;
-            }
-            if (hm && !nt) {
-                alert('برای منشن متن بنویسید.');
-                return;
-            }
-            notesAddInProgress = true;
-            const btn = document.getElementById('modalNoteSubmitBtn');
-            if (btn) btn.disabled = true;
-            const fd = new FormData();
-            fd.append('add_task_note', '1');
-            fd.append('note_task_id', tid);
-            fd.append('note_text', nt);
-            fd.append('csrf_token', CSRF_TOKEN);
-            currentMentions.forEach(m => fd.append('mention_ids[]', m.id));
-            if (hf) Array.from(fi.files).forEach(f => fd.append('note_attachments[]', f));
-            fetch('index.php', {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: fd
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status === 'success' || d.status === 'warning') {
-                    ta.value = '';
-                    if (fi) fi.value = '';
-                    renderNoteFilePreview();
-                    currentMentions = [];
-                    renderMentionsPreview();
-                    const mp = document.getElementById('modalNoteMentionPicker');
-                    if (mp) mp.style.display = 'none';
-                    loadModalNotes(tid);
-                    showAppToast('گزارش ثبت شد', 'success');
-                } else alert(d.message || 'خطا');
-            }).catch(() => alert('خطا')).finally(() => {
-                notesAddInProgress = false;
-                if (btn) btn.disabled = false;
-            });
-        }
-
-        function startEditNote(nid) {
-            const it = document.querySelector(`.modal-note-item[data-note-id="${nid}"]`);
-            if (!it) return;
-            const te = it.querySelector('.modal-note-text');
-            const ae = it.querySelector('.modal-note-actions');
-            if (!te || !ae) return;
-            const ta = document.createElement('textarea');
-            ta.className = 'modal-note-edit-textarea';
-            ta.value = te.textContent || '';
-            te.replaceWith(ta);
-            ta.focus();
-            ae.innerHTML = `<button type="button" class="modal-note-save" onclick="saveEditNote(${nid})"><i class="fas fa-check"></i></button><button type="button" class="modal-note-cancel" onclick="cancelEditNote()"><i class="fas fa-times"></i></button>`;
-        }
-
-        function cancelEditNote() {
-            const t = document.getElementById('edit_task_id').value;
-            if (t) loadModalNotes(t);
-        }
-
-        function saveEditNote(nid) {
-            const it = document.querySelector(`.modal-note-item[data-note-id="${nid}"]`);
-            if (!it) return;
-            const ta = it.querySelector('.modal-note-edit-textarea');
-            if (!ta) return;
-            const nt = (ta.value || '').trim();
-            if (!nt) {
-                alert('متن خالی است.');
-                return;
-            }
-            const fd = new FormData();
-            fd.append('edit_note', '1');
-            fd.append('note_id', nid);
-            fd.append('note_text', nt);
-            fd.append('csrf_token', CSRF_TOKEN);
-            fetch('index.php', {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: fd
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status === 'success') {
-                    const t = document.getElementById('edit_task_id').value;
-                    if (t) loadModalNotes(t);
-                }
-            }).catch(() => alert('خطا'));
-        }
-
-        function deleteModalNote(nid) {
-            if (!confirm('حذف شود؟')) return;
-            const fd = new FormData();
-            fd.append('delete_note', '1');
-            fd.append('note_id', nid);
-            fd.append('csrf_token', CSRF_TOKEN);
-            fetch('index.php', {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: fd
-            }).then(r => r.text()).then(text => {
-                let d;
-                try {
-                    d = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('invalid');
-                }
-                if (d.status === 'success') {
-                    const t = document.getElementById('edit_task_id').value;
-                    if (t) loadModalNotes(t);
-                }
-            }).catch(() => alert('خطا'));
-        }
-
-        function toPersianDigits(n) {
-            const fa = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
-            return String(n).replace(/\d/g, d => fa[parseInt(d, 10)]);
+        /* ===================== HELPERS ===================== */
+        function parseServerTime(s) {
+            if (!s) return 0;
+            const ts = Date.parse(String(s).replace(' ', 'T'));
+            return isNaN(ts) ? 0 : ts;
         }
 
         function escapeHtml(t) {
@@ -6646,22 +5392,1692 @@ require_once __DIR__ . '/../includes/sidebar.php';
                 '"': '&quot;',
                 "'": '&#039;'
             };
-            return String(t).replace(/[&<>"']/g, function(x) {
-                return m[x];
+            return String(t).replace(/[&<>"']/g, c => m[c]);
+        }
+
+        function toPersianDigits(n) {
+            const fa = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+            return String(n).replace(/\d/g, d => fa[parseInt(d, 10)]);
+        }
+
+        /* ===================== PERMISSIONS ===================== */
+        function checkMessagePermissions(el) {
+            const senderId = parseInt(el.getAttribute('data-sender-id'), 10);
+            const createdMs = parseInt(el.getAttribute('data-created-ms'), 10);
+            const currentUserId = parseInt(CURRENT_USER_ID, 10);
+            const isMine = !isNaN(senderId) && !isNaN(currentUserId) && senderId === currentUserId;
+            const now = Date.now();
+            const elapsed = now - createdMs;
+            const isWithinWindow = !isNaN(createdMs) && createdMs > 0 && elapsed >= 0 && elapsed <= EDIT_DELETE_WINDOW_MS;
+
+            return {
+                isMine,
+                createdMs,
+                elapsed,
+                isWithinWindow,
+                hasFile: !!el.querySelector('.chat-file-card, .chat-image-wrapper'),
+                hasText: (() => {
+                    const divs = el.children;
+                    for (let i = 0; i < divs.length; i++) {
+                        const c = divs[i];
+                        if (c.classList.contains('chat-bubble__time')) continue;
+                        if (c.classList.contains('chat-bubble__attachment')) continue;
+                        if (c.classList.contains('task-notif-header')) continue;
+                        if (c.classList.contains('task-notif-actions')) continue;
+                        if (c.tagName === 'DIV' && (c.innerText || c.textContent || '').trim()) return true;
+                    }
+                    return false;
+                })(),
+            };
+        }
+
+        function extractMessageDataFromBubble(el) {
+            const msgId = parseInt(el.getAttribute('data-msg-id'), 10) || 0;
+            const senderId = parseInt(el.getAttribute('data-sender-id'), 10) || 0;
+            const createdMs = parseInt(el.getAttribute('data-created-ms'), 10) || 0;
+
+            let messageText = '';
+            const divs = el.children;
+            for (let i = 0; i < divs.length; i++) {
+                const c = divs[i];
+                if (c.classList.contains('chat-bubble__time')) continue;
+                if (c.classList.contains('chat-bubble__attachment')) continue;
+                if (c.classList.contains('task-notif-header')) continue;
+                if (c.classList.contains('task-notif-actions')) continue;
+                if (c.tagName === 'DIV') {
+                    messageText = c.innerText || c.textContent || '';
+                    break;
+                }
+            }
+
+            let attachmentUrl = null,
+                attachmentName = null;
+            const fileCard = el.querySelector('.chat-file-card');
+            const imgWrap = el.querySelector('.chat-image-wrapper');
+            if (fileCard) {
+                attachmentUrl = fileCard.getAttribute('href');
+                const nameEl = fileCard.querySelector('.chat-file-card__name');
+                attachmentName = nameEl ? nameEl.textContent.trim() : 'file';
+            } else if (imgWrap) {
+                const img = imgWrap.querySelector('img');
+                if (img) {
+                    attachmentUrl = img.getAttribute('src');
+                    attachmentName = img.getAttribute('alt') || 'image';
+                }
+            }
+
+            return {
+                id: msgId,
+                sender_id: senderId,
+                message: messageText,
+                attachment: attachmentUrl,
+                attachment_name: attachmentName,
+                createdAtMs: createdMs
+            };
+        }
+
+        /* ===================== CONTEXT MENU ===================== */
+        function openContextMenu(e, bubbleEl) {
+            e.preventDefault();
+            e.stopPropagation();
+            const msgId = parseInt(bubbleEl.getAttribute('data-msg-id'), 10);
+            if (!msgId) return;
+
+            const perm = checkMessagePermissions(bubbleEl);
+            contextMenuMsgData = extractMessageDataFromBubble(bubbleEl);
+
+            document.querySelectorAll('.chat-bubble.context-active').forEach(el => el.classList.remove('context-active'));
+            bubbleEl.classList.add('context-active');
+
+            const menu = document.getElementById('msgContextMenu');
+            document.getElementById('ctxDownloadBtn').style.display = perm.hasFile ? 'flex' : 'none';
+
+            const showEdit = perm.isMine && perm.hasText && !perm.hasFile && perm.isWithinWindow;
+            const showDelete = perm.isMine && perm.isWithinWindow;
+
+            document.getElementById('ctxEditBtn').style.display = showEdit ? 'flex' : 'none';
+            document.getElementById('ctxEditDivider').style.display = showEdit ? 'block' : 'none';
+            document.getElementById('ctxDeleteBtn').style.display = showDelete ? 'flex' : 'none';
+            document.getElementById('ctxDeleteDivider').style.display = showDelete ? 'block' : 'none';
+
+            if (!perm.hasText && !perm.hasFile && !showEdit && !showDelete) {
+                bubbleEl.classList.remove('context-active');
+                return;
+            }
+
+            menu.style.left = '0px';
+            menu.style.top = '0px';
+            menu.classList.add('active');
+
+            requestAnimationFrame(() => {
+                const r = menu.getBoundingClientRect();
+                let x = e.clientX,
+                    y = e.clientY;
+                if (x + r.width > window.innerWidth - 10) x = window.innerWidth - r.width - 10;
+                if (x < 10) x = 10;
+                if (y + r.height > window.innerHeight - 10) y = window.innerHeight - r.height - 10;
+                if (y < 10) y = 10;
+                menu.style.left = x + 'px';
+                menu.style.top = y + 'px';
             });
         }
 
-        function openEditSubjectModalFromBtn(btn) {
-            document.getElementById('edit_subject_id_field').value = btn.getAttribute('data-subject-id');
-            document.getElementById('edit_subject_title_field').value = btn.getAttribute('data-subject-title') || '';
-            openModal('editSubjectModal');
+        function closeContextMenu() {
+            document.getElementById('msgContextMenu').classList.remove('active');
+            document.querySelectorAll('.chat-bubble.context-active').forEach(el => el.classList.remove('context-active'));
+            contextMenuMsgData = null;
         }
 
+        function handleContextAction(action, e) {
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            if (!contextMenuMsgData) return;
+            const data = {
+                ...contextMenuMsgData
+            };
+            closeContextMenu();
+
+            switch (action) {
+                case 'copy':
+                    copyMessageText(data.message);
+                    break;
+                case 'download':
+                    downloadAttachment(data.attachment, data.attachment_name);
+                    break;
+                case 'edit':
+                    openEditModal(data);
+                    break;
+                case 'delete':
+                    openDeleteModal(data.id);
+                    break;
+            }
+        }
+
+        function copyMessageText(text) {
+            if (!text || !text.trim()) {
+                showToast('متنی برای کپی وجود ندارد', 'error');
+                return;
+            }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text)
+                    .then(() => showToast('متن پیام کپی شد', 'success'))
+                    .catch(() => fallbackCopy(text));
+            } else fallbackCopy(text);
+        }
+
+        function fallbackCopy(text) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0;';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            try {
+                document.execCommand('copy');
+                showToast('متن پیام کپی شد', 'success');
+            } catch (e) {
+                showToast('کپی نشد', 'error');
+            }
+            document.body.removeChild(ta);
+        }
+
+        function downloadAttachment(url, name) {
+            if (!url) {
+                showToast('فایلی برای دانلود وجود ندارد', 'error');
+                return;
+            }
+            showToast('در حال آماده‌سازی دانلود...', 'info');
+            fetch(url)
+                .then(r => {
+                    if (!r.ok) throw 0;
+                    return r.blob();
+                })
+                .then(blob => {
+                    const bUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = bUrl;
+                    a.download = name || 'file';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(bUrl), 1000);
+                    showToast('دانلود شروع شد', 'success');
+                })
+                .catch(() => {
+                    window.open(url, '_blank');
+                    showToast('فایل در تب جدید باز شد', 'info');
+                });
+        }
+
+        /* ===================== DELETE / EDIT MODAL ===================== */
+        function openDeleteModal(msgId) {
+            pendingDeleteMsgId = msgId;
+            document.getElementById('deleteModal').classList.add('active');
+            const btn = document.getElementById('confirmDeleteBtn');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-trash-alt"></i> بله، حذف کن';
+        }
+
+        function closeDeleteModal() {
+            document.getElementById('deleteModal').classList.remove('active');
+            pendingDeleteMsgId = null;
+        }
+
+        function confirmDeleteMessage() {
+            if (!pendingDeleteMsgId) return;
+            const btn = document.getElementById('confirmDeleteBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> در حال حذف...';
+
+            const fd = new FormData();
+            fd.append('action', 'delete');
+            fd.append('message_id', pendingDeleteMsgId);
+
+            fetch('api.php', {
+                    method: 'POST',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: fd
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        const b = document.querySelector(`.chat-bubble[data-msg-id="${pendingDeleteMsgId}"]`);
+                        if (b) {
+                            b.style.transition = 'all 0.3s ease';
+                            b.style.opacity = '0';
+                            b.style.transform = 'translateX(-30px) scale(0.9)';
+                            setTimeout(() => b.remove(), 300);
+                        }
+                        loadedMessageIds.delete(Number(pendingDeleteMsgId));
+                        closeDeleteModal();
+                        showToast('پیام برای هر دو طرف حذف شد', 'success');
+                        refreshSavedBadge();
+                    } else {
+                        showToast(data.message || 'خطا در حذف پیام', 'error');
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fas fa-trash-alt"></i> بله، حذف کن';
+                    }
+                })
+                .catch(() => {
+                    showToast('خطا در ارتباط با سرور', 'error');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-trash-alt"></i> بله، حذف کن';
+                });
+        }
+
+        function openEditModal(data) {
+            editingMsgId = data.id;
+            document.getElementById('editMessageTextarea').value = data.message || '';
+            document.getElementById('editModal').classList.add('active');
+            setTimeout(() => {
+                const ta = document.getElementById('editMessageTextarea');
+                ta.focus();
+                ta.setSelectionRange(ta.value.length, ta.value.length);
+            }, 200);
+            const btn = document.getElementById('confirmEditBtn');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-check"></i> ذخیره تغییرات';
+        }
+
+        function closeEditModal() {
+            document.getElementById('editModal').classList.remove('active');
+            editingMsgId = null;
+        }
+
+        function confirmEditMessage() {
+            if (!editingMsgId) return;
+            const newText = document.getElementById('editMessageTextarea').value.trim();
+            if (!newText) {
+                showToast('متن پیام نمی‌تواند خالی باشد', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('confirmEditBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> در حال ذخیره...';
+
+            const fd = new FormData();
+            fd.append('action', 'edit');
+            fd.append('message_id', editingMsgId);
+            fd.append('message', newText);
+
+            fetch('api.php', {
+                    method: 'POST',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: fd
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        updateBubbleText(editingMsgId, newText);
+                        closeEditModal();
+                        showToast('پیام ویرایش شد', 'success');
+                    } else {
+                        showToast(data.message || 'خطا در ویرایش', 'error');
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fas fa-check"></i> ذخیره تغییرات';
+                    }
+                })
+                .catch(() => {
+                    showToast('خطا در ارتباط با سرور', 'error');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-check"></i> ذخیره تغییرات';
+                });
+        }
+
+        function updateBubbleText(msgId, newText) {
+            const bubble = document.querySelector(`.chat-bubble[data-msg-id="${msgId}"]`);
+            if (!bubble) return;
+            const divs = bubble.children;
+            for (let i = 0; i < divs.length; i++) {
+                const c = divs[i];
+                if (c.classList.contains('chat-bubble__time')) continue;
+                if (c.classList.contains('chat-bubble__attachment')) continue;
+                if (c.classList.contains('task-notif-header')) continue;
+                if (c.classList.contains('task-notif-actions')) continue;
+                if (c.tagName === 'DIV') {
+                    c.innerHTML = escapeHtml(newText).replace(/\n/g, '<br>');
+                    break;
+                }
+            }
+            const timeEl = bubble.querySelector('.chat-bubble__time');
+            if (timeEl && !bubble.querySelector('.chat-bubble__edited')) {
+                const sp = document.createElement('span');
+                sp.className = 'chat-bubble__edited';
+                sp.textContent = '(ویرایش‌شده)';
+                timeEl.insertBefore(sp, timeEl.firstChild);
+            }
+            bubble.setAttribute('data-edited', '1');
+        }
+
+        /* ===================== TOAST ===================== */
+        let toastTimer = null;
+
+        function showToast(text, type = 'success') {
+            const toast = document.getElementById('chatToast');
+            document.getElementById('chatToastText').textContent = text;
+            const icon = toast.querySelector('i');
+            icon.className = 'fas';
+            toast.classList.remove('chat-toast--success', 'chat-toast--error', 'chat-toast--info');
+
+            if (type === 'success') {
+                icon.classList.add('fa-check-circle');
+                toast.classList.add('chat-toast--success');
+            } else if (type === 'error') {
+                icon.classList.add('fa-exclamation-circle');
+                toast.classList.add('chat-toast--error');
+            } else {
+                icon.classList.add('fa-info-circle');
+                toast.classList.add('chat-toast--info');
+            }
+
+            toast.classList.add('active');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toast.classList.remove('active'), 2400);
+        }
+
+        /* ======================================================
+           ⭐ OPEN CHAT
+           ====================================================== */
+        function openChat(userId, element) {
+            if (currentChatUserId === userId && !pendingHighlightMsgId) return;
+
+            /* ⭐ اطلاع به سیستم نوتیف سراسری که کاربر در این چت است
+               این کار قبل از هر poll انجام می‌شود تا نوتیف تکراری نیاید */
+            if (window.ChatNotifications) {
+                try {
+                    window.ChatNotifications.setActiveChat(userId);
+                } catch (e) {}
+            }
+
+            const isSaved = element && element.getAttribute('data-is-saved') === '1';
+            const isBot = element && element.getAttribute('data-is-bot') === '1';
+
+            currentChatUserId = userId;
+            currentIsSaved = isSaved;
+            currentIsBot = isBot;
+
+            lastRenderedDay = null;
+            loadedMessageIds = new Set();
+            firstLoadedMsgId = 0;
+            lastLoadedMsgId = 0;
+            hasMoreBefore = false;
+            hasMoreAfter = false;
+            loadingOlder = false;
+
+            document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
+            if (element) element.classList.add('active');
+
+            let person = element ? {
+                    name: element.getAttribute('data-name') || '',
+                    initial: element.getAttribute('data-initial') || '?',
+                    avatar_url: element.getAttribute('data-avatar-url') || null,
+                } :
+                (CHAT_LIST.find(c => Number(c.user_id) === Number(userId)) || {
+                    name: '',
+                    initial: '?',
+                    avatar_url: null
+                });
+
+            if (!element) currentIsSaved = !!person.is_saved;
+
+            document.getElementById('chatHeaderName').textContent = person.name;
+
+            const headerAvatar = document.getElementById('chatHeaderAvatar');
+            const headerStatus = document.getElementById('chatHeaderStatus');
+            const headerStatusText = document.getElementById('chatHeaderStatusText');
+            const chatInputEl = document.getElementById('chatInput');
+
+            headerAvatar.classList.remove('is-saved-avatar', 'is-bot-avatar', 'online', 'offline');
+
+            if (currentIsSaved) {
+                headerAvatar.innerHTML = '<i class="fas fa-bookmark"></i>';
+                headerAvatar.classList.add('is-saved-avatar');
+                headerStatus.className = 'chat-header__status saved';
+                headerStatusText.textContent = 'ذخیره‌سازی شخصی';
+                chatInputEl.placeholder = 'یادداشت، لینک یا فایل خود را اینجا بنویسید...';
+            } else if (currentIsBot) {
+                headerAvatar.innerHTML = '<i class="fas fa-robot"></i>';
+                headerAvatar.classList.add('is-bot-avatar');
+                headerStatus.className = 'chat-header__status bot';
+                headerStatusText.textContent = 'اطلاع‌رسانی خودکار وظایف';
+                chatInputEl.placeholder = 'این حساب فقط اطلاع‌رسانی می‌کند';
+            } else {
+                if (person.avatar_url) {
+                    headerAvatar.innerHTML = `<img src="${escapeHtml(person.avatar_url)}" alt="${escapeHtml(person.name)}">`;
+                } else {
+                    headerAvatar.textContent = person.initial || '?';
+                }
+                chatInputEl.placeholder = 'پیام خود را بنویسید...';
+            }
+
+            document.getElementById('chatEmptyState').style.display = 'none';
+            document.getElementById('chatActiveArea').style.display = 'flex';
+            document.getElementById('chatBody').innerHTML = '';
+
+            const container = document.getElementById('chatContainer');
+            if (container) container.classList.add('chat-open');
+
+            const badge = document.querySelector(`.chat-item__badge[data-user-id="${userId}"]`);
+            if (badge) badge.remove();
+
+            if (pendingHighlightMsgId) {
+                loadMessagesAround(pendingHighlightMsgId);
+                pendingHighlightMsgId = null;
+            } else {
+                loadInitialMessages();
+            }
+
+            setTimeout(() => chatInputEl.focus(), 200);
+
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(pollNewMessages, 3000);
+
+            if (statusTimer) clearInterval(statusTimer);
+            if (!currentIsSaved && !currentIsBot) {
+                fetchUserStatus();
+                statusTimer = setInterval(fetchUserStatus, 5000);
+            }
+
+            /* ⭐ همگام‌سازی با poller سراسری: یک‌بار دیگر poll کن
+               تا نوتیف‌های pending این کاربر پاک شوند */
+            if (window.ChatNotifications && typeof window.ChatNotifications.pollNow === 'function') {
+                setTimeout(() => {
+                    try {
+                        window.ChatNotifications.pollNow();
+                    } catch (e) {}
+                }, 400);
+            }
+        }
+
+        function closeChatOnMobile() {
+            /* ⭐ اطلاع به سیستم نوتیف سراسری */
+            if (window.ChatNotifications) {
+                try {
+                    window.ChatNotifications.clearActiveChat();
+                } catch (e) {}
+            }
+
+            const c = document.getElementById('chatContainer');
+            if (c) c.classList.remove('chat-open');
+
+            currentChatUserId = null;
+            currentIsSaved = false;
+            currentIsBot = false;
+
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            if (statusTimer) {
+                clearInterval(statusTimer);
+                statusTimer = null;
+            }
+
+            clearFilePreview();
+            closeContextMenu();
+        }
+
+        /* ======================================================
+           LAZY LOADING
+           ====================================================== */
+        function loadInitialMessages() {
+            if (!currentChatUserId) return;
+            const body = document.getElementById('chatBody');
+            body.innerHTML = '<div class="chat-load-more loading" id="loadMoreEl"><span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span></div>';
+
+            fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=initial&limit=${PAGE_SIZE}`, {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') {
+                        showToast('خطا در دریافت پیام‌ها', 'error');
+                        return;
+                    }
+                    const messages = data.messages || [];
+                    hasMoreBefore = !!data.has_more_before;
+                    hasMoreAfter = !!data.has_more_after;
+
+                    body.innerHTML = '';
+                    lastRenderedDay = null;
+
+                    if (messages.length === 0) {
+                        if (currentIsSaved) {
+                            body.innerHTML = `<div class="chat-empty"><i class="fas fa-bookmark" style="color:#fbbf24;opacity:0.6;"></i><h3>پیام‌های ذخیره شده</h3><p>اینجا فضای شخصی شماست. می‌توانید یادداشت‌ها، لینک‌ها و فایل‌های خود را ذخیره کنید.</p></div>`;
+                        } else if (currentIsBot) {
+                            body.innerHTML = `<div class="chat-empty"><i class="fas fa-robot" style="color:#a78bfa;opacity:0.6;"></i><h3>اطلاع‌رسانی تسکام</h3><p>هر زمان شما در وظیفه‌ای منشن شوید، اطلاع‌رسانی آن در اینجا نمایش داده می‌شود.</p></div>`;
+                        } else {
+                            body.innerHTML = '<div class="chat-day"><span>هنوز پیامی رد و بدل نشده</span></div>';
+                        }
+                        return;
+                    }
+
+                    const loader = document.createElement('div');
+                    loader.className = 'chat-load-more';
+                    loader.id = 'loadMoreEl';
+                    loader.innerHTML = '<span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span>';
+                    body.appendChild(loader);
+
+                    messages.forEach(msg => {
+                        appendMessage(msg);
+                        loadedMessageIds.add(Number(msg.id));
+                    });
+
+                    if (messages.length > 0) {
+                        firstLoadedMsgId = Number(messages[0].id);
+                        lastLoadedMsgId = Number(messages[messages.length - 1].id);
+                    }
+
+                    updateLoadMoreUI();
+                    requestAnimationFrame(() => {
+                        body.scrollTop = body.scrollHeight;
+                    });
+                })
+                .catch(() => showToast('خطا در ارتباط با سرور', 'error'));
+        }
+
+        function loadOlderMessages() {
+            if (!currentChatUserId || loadingOlder || !hasMoreBefore || firstLoadedMsgId <= 0) return;
+            loadingOlder = true;
+
+            const body = document.getElementById('chatBody');
+            const loader = document.getElementById('loadMoreEl');
+            if (loader) loader.classList.add('loading');
+
+            const prevScrollHeight = body.scrollHeight;
+            const prevScrollTop = body.scrollTop;
+
+            fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=older&before_id=${firstLoadedMsgId}&limit=${PAGE_SIZE}`, {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    const messages = data.messages || [];
+                    hasMoreBefore = !!data.has_more_before;
+
+                    if (messages.length === 0) {
+                        updateLoadMoreUI();
+                        return;
+                    }
+
+                    firstLoadedMsgId = Number(messages[0].id);
+                    const frag = buildMessagesFragment(messages);
+                    messages.forEach(m => loadedMessageIds.add(Number(m.id)));
+
+                    const loaderEl = document.getElementById('loadMoreEl');
+                    if (loaderEl) loaderEl.insertAdjacentElement('afterend', frag);
+                    else body.insertBefore(frag, body.firstChild);
+
+                    requestAnimationFrame(() => {
+                        const newScrollHeight = body.scrollHeight;
+                        body.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+                    });
+
+                    updateLoadMoreUI();
+                })
+                .catch(() => {})
+                .finally(() => {
+                    loadingOlder = false;
+                });
+        }
+
+        function loadMessagesAround(targetId) {
+            const body = document.getElementById('chatBody');
+            body.innerHTML = '<div class="chat-load-more loading"><span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span></div>';
+
+            fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=around&target_id=${targetId}&limit=${PAGE_SIZE}`, {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    const messages = data.messages || [];
+                    hasMoreBefore = !!data.has_more_before;
+                    hasMoreAfter = !!data.has_more_after;
+
+                    body.innerHTML = '';
+                    lastRenderedDay = null;
+
+                    const loader = document.createElement('div');
+                    loader.className = 'chat-load-more';
+                    loader.id = 'loadMoreEl';
+                    loader.innerHTML = '<span class="chat-load-more__spinner"></span><span class="chat-load-more__text">در حال بارگذاری...</span>';
+                    body.appendChild(loader);
+
+                    messages.forEach(msg => {
+                        appendMessage(msg);
+                        loadedMessageIds.add(Number(msg.id));
+                    });
+
+                    if (messages.length > 0) {
+                        firstLoadedMsgId = Number(messages[0].id);
+                        lastLoadedMsgId = Number(messages[messages.length - 1].id);
+                    }
+
+                    updateLoadMoreUI();
+
+                    setTimeout(() => {
+                        const target = document.querySelector(`.chat-bubble[data-msg-id="${targetId}"]`);
+                        if (target) {
+                            target.scrollIntoView({
+                                block: 'center',
+                                behavior: 'auto'
+                            });
+                            target.classList.add('search-highlight');
+                            setTimeout(() => target.classList.remove('search-highlight'), 2400);
+                        }
+                    }, 150);
+                })
+                .catch(() => {});
+        }
+
+        function pollNewMessages() {
+            if (!currentChatUserId) return;
+            if (lastLoadedMsgId <= 0) return;
+
+            fetch(`api.php?action=fetch&user_id=${currentChatUserId}&mode=newer&after_id=${lastLoadedMsgId}&limit=50`, {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    const messages = data.messages || [];
+                    if (messages.length === 0) return;
+
+                    const body = document.getElementById('chatBody');
+                    isAtBottom = (body.scrollHeight - body.scrollTop - body.clientHeight) < 80;
+
+                    let hasNewFromMe = false;
+                    messages.forEach(msg => {
+                        const msgId = Number(msg.id);
+                        if (!loadedMessageIds.has(msgId)) {
+                            appendMessage(msg);
+                            loadedMessageIds.add(msgId);
+                            if (Number(msg.sender_id) === CURRENT_USER_ID) hasNewFromMe = true;
+                        } else {
+                            updateMessageReadStatus(msgId, Number(msg.is_read));
+                            updateMessageTextIfEdited(msgId, msg);
+                        }
+                    });
+                    lastLoadedMsgId = Math.max(lastLoadedMsgId, Number(messages[messages.length - 1].id));
+
+                    if (isAtBottom || hasNewFromMe) {
+                        requestAnimationFrame(() => {
+                            body.scrollTop = body.scrollHeight;
+                        });
+                    }
+                })
+                .catch(() => {});
+        }
+
+        function updateLoadMoreUI() {
+            const loader = document.getElementById('loadMoreEl');
+            if (!loader) return;
+            loader.classList.remove('loading');
+            if (!hasMoreBefore) {
+                loader.classList.add('no-more');
+                loader.querySelector('.chat-load-more__text').textContent = 'ابتدای گفتگو';
+            } else {
+                loader.querySelector('.chat-load-more__text').textContent = 'برای دیدن پیام‌های قدیمی‌تر اسکرول کنید';
+            }
+        }
+
+        function updateMessageTextIfEdited(msgId, msg) {
+            const b = document.querySelector(`.chat-bubble[data-msg-id="${msgId}"]`);
+            if (!b) return;
+            if (Number(msg.is_edited) === 1 && msg.message) {
+                const divs = b.children;
+                let textDiv = null;
+                for (let i = 0; i < divs.length; i++) {
+                    const c = divs[i];
+                    if (c.classList.contains('chat-bubble__time')) continue;
+                    if (c.classList.contains('chat-bubble__attachment')) continue;
+                    if (c.classList.contains('task-notif-header')) continue;
+                    if (c.classList.contains('task-notif-actions')) continue;
+                    if (c.tagName === 'DIV') {
+                        textDiv = c;
+                        break;
+                    }
+                }
+                const cur = textDiv ? (textDiv.innerText || textDiv.textContent || '') : '';
+                if (cur !== msg.message) {
+                    if (textDiv) textDiv.innerHTML = escapeHtml(msg.message).replace(/\n/g, '<br>');
+                    const timeEl = b.querySelector('.chat-bubble__time');
+                    if (timeEl && !b.querySelector('.chat-bubble__edited')) {
+                        const sp = document.createElement('span');
+                        sp.className = 'chat-bubble__edited';
+                        sp.textContent = '(ویرایش‌شده)';
+                        timeEl.insertBefore(sp, timeEl.firstChild);
+                    }
+                }
+            }
+        }
+
+        function updateMessageReadStatus(msgId, isRead) {
+            const b = document.querySelector(`.chat-bubble[data-msg-id="${msgId}"]`);
+            if (!b) return;
+            const c = b.querySelector('.chat-bubble__time .check');
+            if (!c) return;
+            const wasRead = c.classList.contains('read');
+            const nowRead = isRead === 1;
+            if (wasRead === nowRead) return;
+            if (nowRead) {
+                c.classList.remove('fa-check');
+                c.classList.add('fa-check-double', 'read');
+            } else {
+                c.classList.remove('fa-check-double', 'read');
+                c.classList.add('fa-check');
+            }
+        }
+
+        /* ===================== FILE ===================== */
+        function getFileExtension(n) {
+            return n.split('.').pop().toLowerCase();
+        }
+
+        function getFileIcon(e) {
+            return FILE_ICONS[e] || 'fa-file';
+        }
+
+        function formatFileSize(b) {
+            if (!b || b === 0) return '0 B';
+            const u = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(b) / Math.log(1024));
+            return (b / Math.pow(1024, i)).toFixed(1) + ' ' + u[i];
+        }
+
+        function handleFileSelect(input) {
+            if (!input.files || !input.files[0]) {
+                clearFilePreview();
+                return;
+            }
+            const f = input.files[0];
+            const ext = getFileExtension(f.name);
+
+            if (f.size > MAX_FILE_SIZE) {
+                alert('حجم فایل نباید بیشتر از ۵۰ مگابایت باشد.');
+                input.value = '';
+                clearFilePreview();
+                return;
+            }
+            if (!ALLOWED_EXTENSIONS.includes(ext)) {
+                alert('فرمت فایل مجاز نیست.\nفرمت‌های مجاز: PNG, JPG, PDF, ZIP, TXT');
+                input.value = '';
+                clearFilePreview();
+                return;
+            }
+
+            selectedFile = f;
+
+            const preview = document.getElementById('filePreview');
+            const iconEl = document.getElementById('filePreviewIcon');
+            const nameEl = document.getElementById('filePreviewName');
+            const sizeEl = document.getElementById('filePreviewSize');
+
+            iconEl.className = 'file-preview__icon';
+            if (ext === 'pdf') iconEl.classList.add('type-pdf');
+            else if (ext === 'zip') iconEl.classList.add('type-zip');
+            else if (ext === 'txt') iconEl.classList.add('type-txt');
+            else if (['png', 'jpg', 'jpeg'].includes(ext)) iconEl.classList.add('type-' + (ext === 'jpeg' ? 'jpg' : ext));
+
+            iconEl.innerHTML = `<i class="fas ${getFileIcon(ext)}"></i>`;
+            nameEl.textContent = f.name;
+            sizeEl.textContent = formatFileSize(f.size);
+
+            preview.classList.add('active');
+            setTimeout(() => document.getElementById('chatInput').focus(), 100);
+        }
+
+        function clearFilePreview() {
+            selectedFile = null;
+            document.getElementById('fileInput').value = '';
+            document.getElementById('filePreview').classList.remove('active');
+        }
+
+        function updateUploadProgress(p) {
+            const w = document.getElementById('uploadProgress');
+            const b = document.getElementById('uploadProgressBar');
+            if (p > 0 && p < 100) {
+                w.classList.add('active');
+                b.style.width = p + '%';
+            } else if (p >= 100) {
+                b.style.width = '100%';
+                setTimeout(() => {
+                    w.classList.remove('active');
+                    b.style.width = '0%';
+                }, 300);
+            } else {
+                w.classList.remove('active');
+                b.style.width = '0%';
+            }
+        }
+
+        /* ===================== MESSAGE RENDER ===================== */
+        function createMessageElement(msg) {
+            const senderIdNum = Number(msg.sender_id);
+            const isSent = senderIdNum === CURRENT_USER_ID;
+
+            let cls;
+            if (currentIsSaved) cls = 'saved-self';
+            else cls = isSent ? 'sent' : 'received';
+
+            const createdMs = parseServerTime(msg.created_at);
+            const dateObj = createdMs ? new Date(createdMs) : new Date();
+
+            let checkIcon = '';
+            if (isSent && !currentIsSaved) {
+                checkIcon = Number(msg.is_read) === 1 ?
+                    '<i class="fas fa-check-double check read"></i>' :
+                    '<i class="fas fa-check check"></i>';
+            } else if (currentIsSaved) {
+                checkIcon = '<i class="fas fa-bookmark" style="font-size:0.65rem;color:#d97706;"></i>';
+            }
+
+            let contentHtml = '';
+            let isTaskNotification = false;
+            let taskBtnHtml = '';
+
+            if (msg.message && msg.message.trim() !== '') {
+                let rawMsg = msg.message;
+
+                rawMsg = rawMsg.replace(/\[\[task:([a-fA-F0-9]+)\]\]/g, function(m, token) {
+                    isTaskNotification = true;
+                    const url = '../tasks/index.php?task=' + encodeURIComponent(token);
+                    taskBtnHtml += '<a href="' + url + '" class="chat-task-action-btn" target="_blank" rel="noopener"><i class="fas fa-external-link-alt"></i> باز کردن وظیفه</a>';
+                    return '';
+                });
+
+                rawMsg = rawMsg.replace(/\[\[call:([a-fA-F0-9]+)\]\]/g, function(m, token) {
+                    isTaskNotification = true;
+                    const url = '../call_requests/index.php?call=' + encodeURIComponent(token);
+                    taskBtnHtml += '<a href="' + url + '" class="chat-task-action-btn" style="background:linear-gradient(135deg,#f59e0b,#d97706);box-shadow:0 4px 12px rgba(245,158,11,0.4);" target="_blank" rel="noopener"><i class="fas fa-phone-volume"></i> باز کردن درخواست تماس</a>';
+                    return '';
+                });
+
+                rawMsg = rawMsg.replace(/\s+$/, '').replace(/\n{3,}/g, '\n\n');
+
+                if (isTaskNotification) {
+                    let headerLabel = 'اطلاع‌رسانی';
+                    let headerIcon = 'fa-bell';
+                    let headerColor = '';
+
+                    if (rawMsg.indexOf('📌') === 0 || rawMsg.indexOf('📌 وظیفه جدید') !== -1) {
+                        headerLabel = 'وظیفه جدید';
+                        headerIcon = 'fa-plus-circle';
+                        headerColor = 'style="color:#059669;"';
+                    } else if (rawMsg.indexOf('📞') === 0 || rawMsg.indexOf('📞 درخواست تماس') !== -1) {
+                        headerLabel = 'درخواست تماس جدید';
+                        headerIcon = 'fa-phone-volume';
+                        headerColor = 'style="color:#d97706;"';
+                    } else if (rawMsg.indexOf('📝') === 0 || rawMsg.indexOf('📝 یادداشت') !== -1) {
+                        headerLabel = 'یادداشت جدید';
+                        headerIcon = 'fa-comment-dots';
+                        headerColor = 'style="color:#7c3aed;"';
+                    }
+
+                    const headerHtml = '<div class="task-notif-header"><span class="tn-icon" ' + headerColor + '><i class="fas ' + headerIcon + '"></i></span><span>' + headerLabel + '</span></div>';
+                    const bodyHtml = rawMsg.trim() ? '<div class="task-notif-body">' + escapeHtml(rawMsg.trim()).replace(/\n/g, '<br>') + '</div>' : '';
+                    const actionsHtml = taskBtnHtml ? '<div class="task-notif-actions">' + taskBtnHtml + '</div>' : '';
+                    contentHtml = headerHtml + bodyHtml + actionsHtml;
+                } else {
+                    if (rawMsg.trim()) contentHtml += '<div>' + escapeHtml(rawMsg).replace(/\n/g, '<br>') + '</div>';
+                    if (taskBtnHtml) contentHtml += '<div class="task-notif-actions">' + taskBtnHtml + '</div>';
+                }
+            }
+
+            if (msg.attachment) {
+                const ext = (msg.attachment_type || getFileExtension(msg.attachment)).toLowerCase();
+                const fileUrl = FILE_BASE_URL + msg.attachment;
+                const fileName = msg.attachment_name || msg.attachment;
+                const fileSize = formatFileSize(msg.attachment_size || 0);
+                const icon = getFileIcon(ext);
+
+                if (['png', 'jpg', 'jpeg'].includes(ext)) {
+                    contentHtml += `<div class="chat-bubble__attachment"><div class="chat-image-wrapper" onclick="event.stopPropagation();openLightbox('${escapeHtml(fileUrl)}','${escapeHtml(fileName)}')"><img src="${escapeHtml(fileUrl)}" alt="${escapeHtml(fileName)}" class="chat-image-preview"><div class="image-zoom-hint"><i class="fas fa-expand"></i></div></div></div>`;
+                } else {
+                    contentHtml += `<div class="chat-bubble__attachment"><a href="${escapeHtml(fileUrl)}" class="chat-file-card" download="${escapeHtml(fileName)}" target="_blank" onclick="event.stopPropagation();"><div class="chat-file-card__icon type-${ext}"><i class="fas ${icon}"></i></div><div class="chat-file-card__info"><div class="chat-file-card__name">${escapeHtml(fileName)}</div><div class="chat-file-card__size"><i class="fas fa-download"></i> ${escapeHtml(fileSize)}</div></div></a></div>`;
+                }
+            }
+
+            const editedHtml = Number(msg.is_edited) === 1 ? '<span class="chat-bubble__edited">(ویرایش‌شده)</span>' : '';
+
+            const bubble = document.createElement('div');
+            const clsExtra = isTaskNotification ? ' task-notification' : '';
+            bubble.className = 'chat-bubble ' + cls + clsExtra;
+            bubble.setAttribute('data-msg-id', String(msg.id));
+            bubble.setAttribute('data-created-ms', String(createdMs || Date.now()));
+            bubble.setAttribute('data-sender-id', String(senderIdNum));
+            if (Number(msg.is_edited) === 1) bubble.setAttribute('data-edited', '1');
+
+            bubble.innerHTML = `
+        ${contentHtml}
+        <div class="chat-bubble__time">
+            ${editedHtml}
+            <span>${formatTime(dateObj)}</span>
+            ${checkIcon}
+        </div>
+    `;
+            return bubble;
+        }
+
+        function buildMessagesFragment(messages) {
+            const frag = document.createDocumentFragment();
+            let lastDay = null;
+            messages.forEach(msg => {
+                const createdMs = parseServerTime(msg.created_at);
+                const dateObj = createdMs ? new Date(createdMs) : new Date();
+                const dayLabel = formatDayLabel(dateObj);
+                if (lastDay !== dayLabel) {
+                    const d = document.createElement('div');
+                    d.className = 'chat-day';
+                    d.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
+                    frag.appendChild(d);
+                    lastDay = dayLabel;
+                }
+                frag.appendChild(createMessageElement(msg));
+            });
+            return frag;
+        }
+
+        function appendMessage(msg) {
+            const body = document.getElementById('chatBody');
+            const createdMs = parseServerTime(msg.created_at);
+            const dateObj = createdMs ? new Date(createdMs) : new Date();
+            const dayLabel = formatDayLabel(dateObj);
+            if (lastRenderedDay !== dayLabel) {
+                const d = document.createElement('div');
+                d.className = 'chat-day';
+                d.innerHTML = `<span>${escapeHtml(dayLabel)}</span>`;
+                body.appendChild(d);
+                lastRenderedDay = dayLabel;
+            }
+            body.appendChild(createMessageElement(msg));
+        }
+
+        function formatTime(d) {
+            return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+        }
+
+        function formatDayLabel(d) {
+            const t = new Date(),
+                y = new Date();
+            y.setDate(t.getDate() - 1);
+            const s = d.toDateString();
+            if (s === t.toDateString()) return 'امروز';
+            if (s === y.toDateString()) return 'دیروز';
+            const m = ['فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
+            return d.getDate() + ' ' + m[d.getMonth()] + ' ' + d.getFullYear();
+        }
+
+        /* ===================== HEARTBEAT / STATUS ===================== */
+        function sendHeartbeat() {
+            fetch('api.php?action=heartbeat', {
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            }).catch(() => {});
+        }
+
+        function fetchUserStatus() {
+            if (!currentChatUserId || currentIsSaved || currentIsBot) return;
+            if (statusRequestInFlight) return;
+            statusRequestInFlight = true;
+
+            fetch('api.php?action=user_status&user_id=' + currentChatUserId, {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        updateStatusUI(currentChatUserId, data.is_online, data.last_seen, data.last_seen_text);
+                    }
+                })
+                .catch(() => {})
+                .finally(() => {
+                    statusRequestInFlight = false;
+                });
+        }
+
+        function updateStatusUI(targetUserId, isOnline, lastSeenTs, lastSeenText) {
+            if (currentIsSaved && Number(targetUserId) === Number(CURRENT_USER_ID)) return;
+
+            if (currentChatUserId && Number(currentChatUserId) === Number(targetUserId)) {
+                if (currentIsBot) return;
+                const s = document.getElementById('chatHeaderStatus');
+                const t = document.getElementById('chatHeaderStatusText');
+                const a = document.getElementById('chatHeaderAvatar');
+                s.classList.remove('saved', 'bot');
+
+                if (isOnline) {
+                    s.classList.remove('offline');
+                    s.classList.add('online');
+                    t.textContent = 'آنلاین';
+                    if (a) {
+                        a.classList.remove('offline');
+                        a.classList.add('online');
+                    }
+                } else {
+                    s.classList.remove('online');
+                    s.classList.add('offline');
+                    t.textContent = 'آفلاین — ' + (lastSeenText || 'نامشخص');
+                    if (a) {
+                        a.classList.remove('online');
+                        a.classList.add('offline');
+                    }
+                }
+            }
+
+            const la = document.querySelector(`.chat-item__avatar[data-avatar-for="${targetUserId}"]`);
+            if (la && !la.classList.contains('is-saved-avatar') && !la.classList.contains('is-bot-avatar')) {
+                if (isOnline) {
+                    la.classList.remove('offline');
+                    la.classList.add('online');
+                } else {
+                    la.classList.remove('online');
+                    la.classList.add('offline');
+                }
+            }
+        }
+
+        function fetchAllUsersStatus() {
+            const items = document.querySelectorAll('.chat-item');
+            const ids = [];
+            items.forEach(item => {
+                if (item.getAttribute('data-is-saved') === '1') return;
+                if (item.getAttribute('data-is-bot') === '1') return;
+                const uid = item.getAttribute('data-user-id');
+                if (uid && Number(uid) !== currentChatUserId) ids.push(Number(uid));
+            });
+            if (ids.length === 0) return;
+
+            fetch('api.php?action=users_status&user_ids=' + ids.join(','), {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success' || !data.users) return;
+                    Object.keys(data.users).forEach(uid => {
+                        const info = data.users[uid];
+                        updateStatusUI(Number(uid), info.is_online, info.last_seen, info.last_seen_text);
+                    });
+                })
+                .catch(() => {});
+        }
+
+        /* ===================== SEND ===================== */
+        function sendFileWithMessage() {
+            if (!currentChatUserId || !selectedFile || sendingMessage) return;
+            const inputEl = document.getElementById('chatInput');
+            const text = inputEl.value.trim();
+            sendingMessage = true;
+
+            document.getElementById('chatSendBtn').disabled = true;
+            document.getElementById('attachBtn').disabled = true;
+
+            const fd = new FormData();
+            fd.append('action', 'send_file');
+            fd.append('receiver_id', currentChatUserId);
+            fd.append('message', text);
+            fd.append('attachment', selectedFile);
+
+            const xhr = new XMLHttpRequest();
+            xhr.upload.addEventListener('progress', e => {
+                if (e.lengthComputable) updateUploadProgress(Math.round((e.loaded / e.total) * 100));
+            });
+
+            xhr.addEventListener('load', () => {
+                updateUploadProgress(100);
+                sendingMessage = false;
+                document.getElementById('chatSendBtn').disabled = false;
+                document.getElementById('attachBtn').disabled = false;
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    if (data.status === 'success') {
+                        inputEl.value = '';
+                        autoResize(inputEl);
+                        clearFilePreview();
+                        pollNewMessages();
+                        refreshSavedBadge();
+                    } else alert(data.message || 'خطا در ارسال فایل');
+                } catch (e) {
+                    alert('خطا در پاسخ سرور');
+                }
+            });
+
+            xhr.addEventListener('error', () => {
+                updateUploadProgress(0);
+                sendingMessage = false;
+                document.getElementById('chatSendBtn').disabled = false;
+                document.getElementById('attachBtn').disabled = false;
+                alert('خطا در ارتباط با سرور');
+            });
+
+            xhr.open('POST', 'api.php');
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            xhr.send(fd);
+        }
+
+        function sendMessage(e) {
+            e.preventDefault();
+            if (!currentChatUserId || sendingMessage) return;
+            if (currentIsBot) {
+                showToast('این حساب ربات اطلاع‌رسانی است', 'info');
+                return;
+            }
+            if (selectedFile) {
+                sendFileWithMessage();
+                return;
+            }
+
+            const inputEl = document.getElementById('chatInput');
+            const text = inputEl.value.trim();
+            if (!text) return;
+
+            sendingMessage = true;
+            document.getElementById('chatSendBtn').disabled = true;
+
+            const fd = new FormData();
+            fd.append('action', 'send');
+            fd.append('receiver_id', currentChatUserId);
+            fd.append('message', text);
+
+            fetch('api.php', {
+                    method: 'POST',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: fd
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        inputEl.value = '';
+                        autoResize(inputEl);
+                        pollNewMessages();
+                        refreshSavedBadge();
+                    } else alert(data.message || 'خطا در ارسال');
+                })
+                .catch(() => alert('خطا در ارتباط با سرور'))
+                .finally(() => {
+                    sendingMessage = false;
+                    document.getElementById('chatSendBtn').disabled = false;
+                });
+        }
+
+        /* ===================== CHAT INPUT ===================== */
+        const chatInputEl = document.getElementById('chatInput');
+
+        function autoResize(el) {
+            el.style.height = 'auto';
+            el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+        }
+
+        chatInputEl.addEventListener('input', function() {
+            autoResize(this);
+        });
+        chatInputEl.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                document.getElementById('chatForm').dispatchEvent(new Event('submit'));
+            }
+        });
+
+        /* ===================== SIDEBAR SEARCH ===================== */
+        document.getElementById('chatSearchInput').addEventListener('input', function() {
+            const q = this.value.trim().toLowerCase();
+            document.querySelectorAll('.chat-item').forEach(item => {
+                const name = (item.getAttribute('data-name') || '').toLowerCase();
+                item.style.display = (!q || name.includes(q)) ? 'flex' : 'none';
+            });
+        });
+
+        document.getElementById('chatBody').addEventListener('scroll', function() {
+            closeContextMenu();
+            if (this.scrollTop < 120 && hasMoreBefore && !loadingOlder) {
+                loadOlderMessages();
+            }
+        });
+
+        /* ===================== UNREAD COUNTS ===================== */
+        function pollUnreadCounts() {
+            fetch('api.php?action=unread_counts', {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    const counts = data.counts || {};
+                    document.querySelectorAll('.chat-item').forEach(item => {
+                        if (item.getAttribute('data-is-saved') === '1') return;
+                        const uid = item.getAttribute('data-user-id');
+                        if (!uid) return;
+                        if (currentChatUserId && String(currentChatUserId) === uid && !currentIsSaved) return;
+                        const ex = item.querySelector('.chat-item__badge');
+                        const c = counts[uid] || 0;
+                        if (c > 0) {
+                            if (ex) ex.textContent = c;
+                            else {
+                                const b = document.createElement('div');
+                                b.className = 'chat-item__badge';
+                                b.setAttribute('data-user-id', uid);
+                                b.textContent = c;
+                                item.appendChild(b);
+                            }
+                        } else if (ex) ex.remove();
+                    });
+                })
+                .catch(() => {});
+        }
+
+        function refreshSavedBadge() {
+            if (!currentIsSaved) return;
+            fetch('api.php?action=saved_info', {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    const item = document.querySelector('.chat-item.is-saved');
+                    if (!item) return;
+                    let badge = item.querySelector('.saved-count-badge');
+                    if (data.total_count > 0) {
+                        if (!badge) {
+                            badge = document.createElement('span');
+                            badge.className = 'saved-count-badge';
+                            const n = item.querySelector('.chat-item__name');
+                            if (n) n.appendChild(badge);
+                        }
+                        badge.textContent = data.total_count;
+                    } else if (badge) badge.remove();
+
+                    const lastEl = item.querySelector('.chat-item__last');
+                    if (lastEl && data.last_message) {
+                        let p = '';
+                        if (data.last_message.message) p = data.last_message.message.substring(0, 40);
+                        else if (data.last_message.attachment_name) p = '📎 ' + data.last_message.attachment_name.substring(0, 35);
+                        else p = 'فایل';
+                        lastEl.textContent = p;
+                    }
+                })
+                .catch(() => {});
+        }
+
+        /* ===================== SEARCH MODAL ===================== */
+        function openSearchModal(defaultScope) {
+            const overlay = document.getElementById('searchModalOverlay');
+            overlay.classList.add('active');
+            document.body.style.overflow = 'hidden';
+
+            const convoBtn = document.getElementById('scopeConversationBtn');
+            if (currentChatUserId && !currentIsSaved) {
+                convoBtn.disabled = false;
+                setSearchScope(defaultScope === 'conversation' ? 'conversation' : 'all');
+            } else {
+                convoBtn.disabled = true;
+                setSearchScope('all');
+            }
+
+            setTimeout(() => {
+                const inp = document.getElementById('searchQueryInput');
+                inp.focus();
+                inp.select();
+            }, 150);
+        }
+
+        function closeSearchModal() {
+            const overlay = document.getElementById('searchModalOverlay');
+            overlay.classList.remove('active');
+            document.body.style.overflow = '';
+            if (searchAbortController) {
+                searchAbortController.abort();
+                searchAbortController = null;
+            }
+            clearTimeout(searchTimer);
+        }
+
+        function setSearchScope(scope) {
+            searchScope = scope;
+            document.querySelectorAll('.search-modal__scope-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.getAttribute('data-scope') === scope);
+            });
+            if (searchInputTouched) triggerSearch();
+        }
+
+        document.getElementById('searchQueryInput').addEventListener('input', function() {
+            searchInputTouched = true;
+            clearTimeout(searchTimer);
+            const q = this.value.trim();
+            if (q.length < 2) {
+                document.getElementById('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-keyboard"></i>حداقل ۲ کاراکتر تایپ کنید تا جستجو شروع شود...</div>';
+                return;
+            }
+            document.getElementById('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-spinner fa-spin"></i>در حال جستجو...</div>';
+            searchTimer = setTimeout(triggerSearch, 400);
+        });
+
+        function triggerSearch() {
+            const q = document.getElementById('searchQueryInput').value.trim();
+            if (q.length < 2) return;
+
+            if (searchAbortController) searchAbortController.abort();
+            searchAbortController = new AbortController();
+
+            let url = `api.php?action=search&q=${encodeURIComponent(q)}&scope=${searchScope}`;
+            if (searchScope === 'conversation' && currentChatUserId) url += `&user_id=${currentChatUserId}`;
+
+            fetch(url, {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    signal: searchAbortController.signal
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') {
+                        document.getElementById('searchResultsBody').innerHTML = `<div class="search-modal__empty"><i class="fas fa-exclamation-circle"></i>${escapeHtml(data.message || 'خطا در جستجو')}</div>`;
+                        return;
+                    }
+                    renderSearchResults(data.results || [], q);
+                })
+                .catch(err => {
+                    if (err.name === 'AbortError') return;
+                    document.getElementById('searchResultsBody').innerHTML = '<div class="search-modal__empty"><i class="fas fa-exclamation-circle"></i>خطا در ارتباط با سرور</div>';
+                });
+        }
+
+        function renderSearchResults(results, query) {
+            lastSearchResults = results;
+            const body = document.getElementById('searchResultsBody');
+            if (results.length === 0) {
+                body.innerHTML = `<div class="search-modal__empty"><i class="fas fa-search-minus"></i>نتیجه‌ای برای «${escapeHtml(query)}» یافت نشد</div>`;
+                return;
+            }
+            let html = `<div class="search-modal__info">${results.length} نتیجه یافت شد</div>`;
+            const qLower = query.toLowerCase();
+
+            results.forEach(r => {
+                const createdMs = parseServerTime(r.created_at);
+                const dateObj = createdMs ? new Date(createdMs) : new Date();
+                const timeStr = formatTime(dateObj);
+                const dayLabel = formatDayLabel(dateObj);
+
+                let avatar = '?';
+                if (r.from_saved) avatar = '<i class="fas fa-bookmark"></i>';
+                else avatar = escapeHtml(r.from_name ? r.from_name.charAt(0) : '?');
+
+                let preview = '';
+                if (r.message && r.message.trim()) preview = r.message.replace(/\[\[task:[a-fA-F0-9]+\]\]/g, '').trim();
+                else if (r.attachment_name) preview = '📎 ' + r.attachment_name;
+
+                const highlighted = highlightQuery(escapeHtml(preview), qLower);
+
+                let badges = '';
+                if (r.is_mine) badges += '<span class="search-result__badge">شما</span>';
+                if (r.attachment_name) badges += '<span class="search-result__badge file">📎 فایل</span>';
+
+                html += `
+            <div class="search-result" onclick="jumpToResult(${r.id}, ${r.other_user_id}, ${r.from_saved ? 1 : 0})">
+                <div class="search-result__avatar ${r.from_saved ? 'is-saved-avatar' : ''}">${avatar}</div>
+                <div class="search-result__info">
+                    <div class="search-result__top">
+                        <div class="search-result__name">${escapeHtml(r.from_saved ? 'پیام های ذخیره شده' : (r.from_name || 'کاربر'))} ${badges}</div>
+                        <div class="search-result__time">${escapeHtml(dayLabel)} • ${timeStr}</div>
+                    </div>
+                    <div class="search-result__text">${highlighted || '(بدون متن)'}</div>
+                </div>
+            </div>`;
+            });
+            body.innerHTML = html;
+        }
+
+        function highlightQuery(escapedText, qLower) {
+            if (!escapedText) return '';
+            const q = qLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (!q) return escapedText;
+            try {
+                const re = new RegExp('(' + q + ')', 'gi');
+                return escapedText.replace(re, '<mark>$1</mark>');
+            } catch (e) {
+                return escapedText;
+            }
+        }
+
+        function jumpToResult(msgId, otherUserId, fromSaved) {
+            closeSearchModal();
+            pendingHighlightMsgId = msgId;
+
+            if (currentChatUserId === otherUserId && currentIsSaved === !!fromSaved) {
+                loadMessagesAround(msgId);
+                pendingHighlightMsgId = null;
+                return;
+            }
+
+            const item = document.querySelector(`.chat-item[data-user-id="${otherUserId}"]`);
+            openChat(otherUserId, item);
+        }
+
+        /* ===================== LIGHTBOX ===================== */
+        const lightboxEl = document.getElementById('imageLightbox');
+        const lightboxImg = document.getElementById('lightboxImage');
+        const lightboxCanvas = document.getElementById('lightboxCanvas');
+        const zoomLevelEl = document.getElementById('zoomLevel');
+
+        function openLightbox(src, name) {
+            lightboxCurrentUrl = src;
+            lightboxCurrentName = name || 'image';
+            lightboxImg.src = src;
+            lightboxImg.alt = name || '';
+            lightboxZoom = 1;
+            lightboxPanX = 0;
+            lightboxPanY = 0;
+            updateLightboxTransform();
+            lightboxEl.classList.add('active');
+            document.body.style.overflow = 'hidden';
+
+            lightboxImg.onload = function() {
+                const w = lightboxImg.naturalWidth;
+                const h = lightboxImg.naturalHeight;
+                const vw = window.innerWidth * 0.9;
+                const vh = window.innerHeight * 0.8;
+                if (w > vw || h > vh) {
+                    const r = Math.min(vw / w, vh / h);
+                    if (r < 1) {
+                        lightboxZoom = r;
+                        updateLightboxTransform();
+                    }
+                }
+            };
+        }
+
+        function closeLightbox() {
+            lightboxEl.classList.remove('active');
+            document.body.style.overflow = '';
+            lightboxImg.src = '';
+            lightboxCurrentUrl = '';
+            lightboxCurrentName = '';
+        }
+
+        function updateLightboxTransform() {
+            lightboxImg.style.transform = `translate(${lightboxPanX}px, ${lightboxPanY}px) scale(${lightboxZoom})`;
+            zoomLevelEl.textContent = Math.round(lightboxZoom * 100) + '%';
+        }
+
+        function zoomIn() {
+            if (lightboxZoom < ZOOM_MAX) {
+                lightboxZoom = Math.min(ZOOM_MAX, lightboxZoom + ZOOM_STEP);
+                updateLightboxTransform();
+            }
+        }
+
+        function zoomOut() {
+            if (lightboxZoom > ZOOM_MIN) {
+                lightboxZoom = Math.max(ZOOM_MIN, lightboxZoom - ZOOM_STEP);
+                if (lightboxZoom <= 1) {
+                    lightboxPanX = 0;
+                    lightboxPanY = 0;
+                }
+                updateLightboxTransform();
+            }
+        }
+
+        function resetZoom() {
+            lightboxZoom = 1;
+            lightboxPanX = 0;
+            lightboxPanY = 0;
+            updateLightboxTransform();
+        }
+
+        function downloadLightboxImage() {
+            if (!lightboxCurrentUrl) return;
+            fetch(lightboxCurrentUrl)
+                .then(r => r.blob())
+                .then(blob => {
+                    const u = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = u;
+                    a.download = lightboxCurrentName || 'image';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(u), 1000);
+                })
+                .catch(() => window.open(lightboxCurrentUrl, '_blank'));
+        }
+
+        lightboxCanvas.addEventListener('mousedown', e => {
+            if (lightboxZoom <= 1) return;
+            isDragging = true;
+            lightboxCanvas.classList.add('dragging');
+            dragStartX = e.clientX - lightboxPanX;
+            dragStartY = e.clientY - lightboxPanY;
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            lightboxPanX = e.clientX - dragStartX;
+            lightboxPanY = e.clientY - dragStartY;
+            updateLightboxTransform();
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                lightboxCanvas.classList.remove('dragging');
+            }
+        });
+
+        lightboxEl.addEventListener('wheel', e => {
+            if (!lightboxEl.classList.contains('active')) return;
+            e.preventDefault();
+            if (e.deltaY < 0) zoomIn();
+            else zoomOut();
+        }, {
+            passive: false
+        });
+
+        /* ===================== GLOBAL EVENTS ===================== */
+        document.addEventListener('contextmenu', e => {
+            const b = e.target.closest('.chat-bubble');
+            if (b && b.hasAttribute('data-msg-id')) {
+                if (b.classList.contains('task-notification')) {
+                    e.preventDefault();
+                    const txt = (b.querySelector('.task-notif-body') || {}).innerText || '';
+                    if (txt.trim()) {
+                        if (navigator.clipboard) {
+                            navigator.clipboard.writeText(txt)
+                                .then(() => showToast('متن کپی شد', 'success'))
+                                .catch(() => {});
+                        }
+                    }
+                    return;
+                }
+                openContextMenu(e, b);
+            }
+        });
+
+        document.addEventListener('click', e => {
+            const m = document.getElementById('msgContextMenu');
+            if (!m || !m.classList.contains('active')) return;
+            if (e.target.closest('#msgContextMenu')) return;
+            closeContextMenu();
+        });
+
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                closeContextMenu();
+                closeSidebar();
+                if (lightboxEl.classList.contains('active')) closeLightbox();
+                closeDeleteModal();
+                closeEditModal();
+                const sm = document.getElementById('searchModalOverlay');
+                if (sm.classList.contains('active')) closeSearchModal();
+            }
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'k')) {
+                e.preventDefault();
+                openSearchModal(currentChatUserId && !currentIsSaved ? 'conversation' : 'all');
+            }
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                const em = document.getElementById('editModal');
+                if (em && em.classList.contains('active')) {
+                    e.preventDefault();
+                    confirmEditMessage();
+                }
+            }
+            if (lightboxEl.classList.contains('active')) {
+                switch (e.key) {
+                    case '+':
+                    case '=':
+                        e.preventDefault();
+                        zoomIn();
+                        break;
+                    case '-':
+                    case '_':
+                        e.preventDefault();
+                        zoomOut();
+                        break;
+                    case '0':
+                        e.preventDefault();
+                        resetZoom();
+                        break;
+                    case 'd':
+                    case 'D':
+                        e.preventDefault();
+                        downloadLightboxImage();
+                        break;
+                }
+            }
+        });
+
+        /* ===================== SIDEBAR TOGGLE ===================== */
         function toggleSidebar() {
-            const s = document.getElementById('appSidebar'),
-                o = document.getElementById('sidebarOverlay'),
-                b = document.getElementById('hamburgerBtn');
-            if (!s || !o || !b) return;
+            const s = document.getElementById('appSidebar');
+            const o = document.getElementById('sidebarOverlay');
+            const b = document.getElementById('hamburgerBtn');
             if (s.classList.contains('open')) closeSidebar();
             else {
                 s.classList.add('open');
@@ -6672,462 +7088,43 @@ require_once __DIR__ . '/../includes/sidebar.php';
         }
 
         function closeSidebar() {
-            const s = document.getElementById('appSidebar'),
-                o = document.getElementById('sidebarOverlay'),
-                b = document.getElementById('hamburgerBtn');
+            const s = document.getElementById('appSidebar');
+            const o = document.getElementById('sidebarOverlay');
+            const b = document.getElementById('hamburgerBtn');
             if (!s || !o || !b) return;
             s.classList.remove('open');
             o.classList.remove('active');
             b.classList.remove('active');
             document.body.style.overflow = '';
         }
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') {
-                const em = document.getElementById('editTaskModal');
-                if (em && em.classList.contains('active')) {
-                    requestCloseEditModal();
-                    return;
-                }
-                const cm = document.getElementById('confirmCloseModal');
-                if (cm && cm.classList.contains('active')) {
-                    closeModal('confirmCloseModal');
-                    return;
-                }
-                closeSidebar();
-            }
-        });
+
         let resizeTimer;
-        window.addEventListener('resize', function() {
+        window.addEventListener('resize', () => {
             clearTimeout(resizeTimer);
-            resizeTimer = setTimeout(function() {
+            resizeTimer = setTimeout(() => {
                 if (window.innerWidth > 900) closeSidebar();
             }, 150);
         });
 
-        function initCharts() {
-            if (typeof Chart === 'undefined') return;
-            const D = window.DASHBOARD_DATA;
-            if (!D) return;
-            Chart.defaults.font.family = 'Segoe UI, Tahoma, sans-serif';
-            Chart.defaults.font.size = 12;
-            Chart.defaults.color = '#8a94ad';
-            Chart.defaults.animation = false;
-            const tc = document.getElementById('trendChart');
-            if (tc) {
-                const g = tc.getContext('2d').createLinearGradient(0, 0, 0, 240);
-                g.addColorStop(0, 'rgba(76, 139, 245, 0.35)');
-                g.addColorStop(1, 'rgba(76, 139, 245, 0.02)');
-                new Chart(tc, {
-                    type: 'line',
-                    data: {
-                        labels: D.trendDays,
-                        datasets: [{
-                            label: 'وظایف من',
-                            data: D.trendCounts,
-                            borderColor: '#4c8bf5',
-                            backgroundColor: g,
-                            borderWidth: 3,
-                            fill: true,
-                            tension: 0.45,
-                            pointRadius: 0,
-                            pointHoverRadius: 7,
-                            pointHoverBackgroundColor: '#4c8bf5',
-                            pointHoverBorderColor: '#fff',
-                            pointHoverBorderWidth: 3
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        animation: false,
-                        plugins: {
-                            legend: {
-                                display: false
-                            }
-                        },
-                        scales: {
-                            y: {
-                                beginAtZero: true,
-                                ticks: {
-                                    stepSize: 1,
-                                    precision: 0
-                                },
-                                grid: {
-                                    color: '#f1f4fb'
-                                }
-                            },
-                            x: {
-                                grid: {
-                                    display: false
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            const pc = document.getElementById('priorityChart');
-            if (pc) {
-                const gB = pc.getContext('2d').createLinearGradient(0, 0, 0, 240);
-                gB.addColorStop(0, '#4ed4a3');
-                gB.addColorStop(1, '#2ebc8a');
-                new Chart(pc, {
-                    type: 'bar',
-                    data: {
-                        labels: ['کم', 'متوسط', 'زیاد'],
-                        datasets: [{
-                            label: 'تعداد',
-                            data: [D.priorityLow, D.priorityMedium, D.priorityHigh],
-                            backgroundColor: gB,
-                            borderRadius: 10,
-                            borderSkipped: false,
-                            barThickness: 42
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        animation: false,
-                        plugins: {
-                            legend: {
-                                display: false
-                            }
-                        },
-                        scales: {
-                            y: {
-                                beginAtZero: true,
-                                ticks: {
-                                    stepSize: 1,
-                                    precision: 0
-                                },
-                                grid: {
-                                    color: '#f1f4fb'
-                                }
-                            },
-                            x: {
-                                grid: {
-                                    display: false
-                                },
-                                ticks: {
-                                    font: {
-                                        size: 12,
-                                        weight: 'bold'
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            const tkc = document.getElementById('tasksChart');
-            if (tkc) new Chart(tkc, {
-                type: 'doughnut',
-                data: {
-                    labels: ['انجام شده', 'انجام نشده'],
-                    datasets: [{
-                        data: [D.tasksCompleted, D.tasksPending],
-                        backgroundColor: ['#4ed4a3', '#ffa751'],
-                        borderWidth: 0,
-                        hoverOffset: 8
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    animation: false,
-                    cutout: '68%',
-                    plugins: {
-                        legend: {
-                            position: 'bottom',
-                            labels: {
-                                padding: 18,
-                                font: {
-                                    size: 13,
-                                    weight: 'bold'
-                                },
-                                usePointStyle: true,
-                                pointStyle: 'circle'
-                            }
-                        }
-                    }
-                }
-            });
-            const atc = document.getElementById('avgTimeChart');
-            if (atc) new Chart(atc, {
-                type: 'bar',
-                data: {
-                    labels: ['وظایف من', 'درخواست‌های تماس', 'تیکت‌ها'],
-                    datasets: [{
-                        label: 'میانگین زمان (ساعت)',
-                        data: [D.taskAvgHours, D.callAvgHours, D.ticketAvgHours],
-                        backgroundColor: ['rgba(76, 139, 245, 0.85)', 'rgba(46, 188, 138, 0.85)', 'rgba(127, 76, 240, 0.85)'],
-                        borderRadius: 10,
-                        borderSkipped: false,
-                        barThickness: 55
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    animation: false,
-                    plugins: {
-                        legend: {
-                            display: false
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(c) {
-                                    const h = c.parsed.y;
-                                    if (h <= 0) return 'بدون داده';
-                                    if (h < 1) return Math.round(h * 60) + ' دقیقه';
-                                    if (h < 24) {
-                                        const hh = Math.floor(h);
-                                        const mm = Math.round((h - hh) * 60);
-                                        return mm === 0 ? hh + ' ساعت' : hh + ' ساعت و ' + mm + ' دقیقه';
-                                    }
-                                    return Math.floor(h / 24) + ' روز';
-                                }
-                            }
-                        }
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            grid: {
-                                color: '#f1f4fb'
-                            }
-                        },
-                        x: {
-                            grid: {
-                                display: false
-                            },
-                            ticks: {
-                                font: {
-                                    size: 12,
-                                    weight: 'bold'
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
+        /* ===================== INIT ===================== */
+        sendHeartbeat();
+        setInterval(sendHeartbeat, 10000);
+        setInterval(pollUnreadCounts, 8000);
+        setInterval(fetchAllUsersStatus, 5000);
+        setTimeout(fetchAllUsersStatus, 500);
 
-        function bindAjaxForms() {
-            const cf = document.querySelector('#createTaskModal form.task-modal-form');
-            if (cf && !cf.__ajaxBound) {
-                cf.__ajaxBound = true;
-                cf.addEventListener('submit', async function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    await submitTaskFormAjax(cf, 'createTaskModal');
-                });
+        /* ⭐ باز کردن خودکار گفتگو از طریق ?chat=USER_ID */
+        if (AUTO_OPEN_CHAT_ID > 0) {
+            const autoItem = document.querySelector(`.chat-item[data-user-id="${AUTO_OPEN_CHAT_ID}"]`);
+            if (autoItem) {
+                setTimeout(() => openChat(AUTO_OPEN_CHAT_ID, autoItem), 350);
             }
-            const ef = document.getElementById('editTaskForm');
-            if (ef && !ef.__ajaxBound) {
-                ef.__ajaxBound = true;
-                ef.addEventListener('submit', async function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    await submitTaskFormAjax(ef, 'editTaskModal');
-                });
-            }
-            document.querySelectorAll('form').forEach(form => {
-                if (form.__ajaxBound) return;
-                const di = form.querySelector('input[name="delete"]');
-                const ds = form.querySelector('input[name="delete_subject"]');
-                if (di || ds) {
-                    form.__ajaxBound = true;
-                    form.addEventListener('submit', async function(e) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (!confirm('حذف شود؟')) return;
-                        const fd = new FormData(form);
-                        try {
-                            const res = await fetch('index.php', {
-                                method: 'POST',
-                                headers: {
-                                    'X-Requested-With': 'XMLHttpRequest'
-                                },
-                                body: fd
-                            });
-                            const data = await res.json();
-                            if (data.status === 'success' || data.status === 'warning') {
-                                showAppToast(data.message || 'حذف شد', 'success');
-                                await refreshTaskList();
-                            } else showAppToast(data.message || 'خطا', 'error');
-                        } catch (err) {
-                            showAppToast('خطا', 'error');
-                        }
-                    });
-                }
-            });
-        }
-        async function submitTaskFormAjax(form, mid) {
-            const sb = form.querySelector('button[type="submit"]');
-            if (sb) sb.disabled = true;
             try {
-                const fd = new FormData(form);
-                const btn = form.querySelector('button[name="add_task"], button[name="update_task"]');
-                if (btn && btn.name && !fd.has(btn.name)) fd.append(btn.name, btn.value || '1');
-                const res = await fetch('index.php', {
-                    method: 'POST',
-                    headers: {
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    body: fd
-                });
-                const data = await res.json();
-                if (data.status === 'success' || data.status === 'warning') {
-                    closeModal(mid);
-                    showAppToast(data.message || 'ذخیره شد', data.type === 'warning' ? 'info' : 'success');
-                    await refreshTaskList();
-                } else showAppToast(data.message || 'خطا', 'error');
-            } catch (err) {
-                showAppToast('خطای شبکه', 'error');
-            } finally {
-                if (sb) sb.disabled = false;
-            }
+                const cleanUrl = new URL(window.location.href);
+                cleanUrl.searchParams.delete('chat');
+                window.history.replaceState({}, '', cleanUrl.toString());
+            } catch (e) {}
         }
-
-        function requestNotificationPermission() {
-            if (!('Notification' in window)) return;
-            if (Notification.permission === 'default') {
-                try {
-                    Notification.requestPermission();
-                } catch (e) {}
-            }
-        }
-        let notificationPollerStarted = false;
-
-        function startNotificationPoller() {
-            if (notificationPollerStarted) return;
-            notificationPollerStarted = true;
-            async function poll() {
-                try {
-                    const res = await fetch('index.php?check_due_notifications=1', {
-                        headers: {
-                            'X-Requested-With': 'XMLHttpRequest'
-                        }
-                    });
-                    const data = await res.json();
-                    if (data.status === 'success' && Array.isArray(data.tasks) && data.tasks.length > 0) {
-                        data.tasks.forEach(t => {
-                            const lines = [];
-                            if (t.description) lines.push(t.description);
-                            if (t.project_title) lines.push('پروژه: ' + t.project_title);
-                            const body = lines.join('\n') || 'زمان انجام این وظیفه رسیده است.';
-                            const title = 'یادآوری وظیف : ' + t.title;
-                            if ('Notification' in window && Notification.permission === 'granted') {
-                                try {
-                                    const n = new Notification(title, {
-                                        body: body,
-                                        icon: 'https://img.icons8.com/color/96/dashboard-layout.png',
-                                        tag: 'task-due-' + t.id,
-                                        requireInteraction: true
-                                    });
-                                    n.onclick = function() {
-                                        window.focus();
-                                        n.close();
-                                    };
-                                } catch (e) {}
-                            }
-                            showAppToast('⏰ یادآوری: ' + t.title, 'info');
-                        });
-                    }
-                } catch (e) {}
-            }
-            poll();
-            setInterval(poll, 30000);
-        }
-
-        document.addEventListener('DOMContentLoaded', function() {
-            initPersianDatePickers();
-            setupDatepickerDigitConversion();
-            const cfi = document.getElementById('createFileInput');
-            if (cfi) cfi.addEventListener('change', () => renderFilePreview('createFileInput', 'createFilePreviewList'));
-            const efi = document.getElementById('editFileInput');
-            if (efi) efi.addEventListener('change', () => renderFilePreview('editFileInput', 'editFilePreviewList'));
-            setupDropZone('createFileDropZone', 'createFileInput', 'createFilePreviewList');
-            setupDropZone('editFileDropZone', 'editFileInput', 'editFilePreviewList');
-            const nfi = document.getElementById('modalNoteFileInput');
-            if (nfi) nfi.addEventListener('change', renderNoteFilePreview);
-            const nt = document.getElementById('modalNoteText');
-            if (nt) {
-                nt.addEventListener('keydown', function(e) {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        submitModalNote();
-                    }
-                });
-            }
-            requestNotificationPermission();
-            startNotificationPoller();
-            bindAjaxForms();
-            const observer = new MutationObserver(function() {
-                bindAjaxForms();
-            });
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true
-            });
-            if (typeof Chart === 'undefined') {
-                const s = document.createElement('script');
-                s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js';
-                s.onload = initCharts;
-                document.head.appendChild(s);
-            } else initCharts();
-            <?php if ($sharedTaskData): ?>
-                    (function tryOpenSharedTask() {
-                        let attempts = 0;
-
-                        function attempt() {
-                            attempts++;
-                            const em = document.getElementById('editTaskModal');
-                            const eid = document.getElementById('edit_task_id');
-                            if (em && eid && typeof openEditModal === 'function') {
-                                try {
-                                    openEditModal(SHARED_TASK_DATA, SHARED_TASK_PERMS.edit, SHARED_TASK_PERMS.reassign, SHARED_TASK_PERMS.change_project, SHARED_TASK_PERMS.complete);
-                                } catch (e) {}
-                                return;
-                            }
-                            if (attempts < 30) setTimeout(attempt, 100);
-                        }
-                        setTimeout(attempt, 300);
-                    })();
-            <?php endif; ?>
-        });
-
-        document.addEventListener('keydown', function(e) {
-            const isSaveCombo = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 's' || e.key === 'S' || e.keyCode === 83);
-            if (!isSaveCombo) return;
-            const cm = document.getElementById('createTaskModal');
-            const em = document.getElementById('editTaskModal');
-            if (cm && cm.classList.contains('active')) {
-                e.preventDefault();
-                e.stopPropagation();
-                const b = cm.querySelector('button[name="add_task"]');
-                if (b) b.click();
-                return;
-            }
-            if (em && em.classList.contains('active')) {
-                e.preventDefault();
-                e.stopPropagation();
-                const b = em.querySelector('button[name="update_task"]');
-                if (b && b.style.display !== 'none') b.click();
-                return;
-            }
-        }, true);
-        document.addEventListener('keydown', function(e) {
-            const em = document.getElementById('editTaskModal');
-            if (!em || !em.classList.contains('active')) return;
-            const nt = document.getElementById('modalNoteText');
-            if (!nt || document.activeElement !== nt) return;
-            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                e.preventDefault();
-                submitModalNote();
-            }
-        }, true);
     </script>
 </body>
 
