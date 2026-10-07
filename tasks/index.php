@@ -4004,8 +4004,21 @@ require_once __DIR__ . '/../includes/sidebar.php';
         }
 
         .project-picker__avatar {
-            border-radius: 11px;
-            background: linear-gradient(135deg, #a26bfa, #7f4cf0);
+            border-radius: 50% !important;
+            background: transparent !important;
+            overflow: hidden;
+        }
+
+        .project-picker__avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+            display: block;
+        }
+
+        .project-picker__avatar:not(:has(img)) {
+            background: linear-gradient(135deg, #a26bfa, #7f4cf0) !important;
         }
 
         .project-picker__avatar.is-empty {
@@ -4159,8 +4172,21 @@ require_once __DIR__ . '/../includes/sidebar.php';
         }
 
         .project-picker__option-avatar {
-            border-radius: 11px;
-            background: linear-gradient(135deg, #a26bfa, #7f4cf0);
+            border-radius: 50% !important;
+            background: transparent !important;
+            overflow: hidden;
+        }
+
+        .project-picker__option-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+            display: block;
+        }
+
+        .project-picker__option-avatar:not(:has(img)) {
+            background: linear-gradient(135deg, #a26bfa, #7f4cf0) !important;
         }
 
         .project-picker__option-avatar.is-empty {
