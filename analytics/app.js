@@ -251,7 +251,7 @@ function renderSpeedChart() {
 
     const totalDays = (D.trendDays || []).length;
 
-    // ⭐ فقط روزهایی که حداقل یک کاربر داده دارد
+    // فقط روزهایی که حداقل یک کاربر داده دارد
     const activeDayIndexes = [];
     for (let i = 0; i < totalDays; i++) {
         const hasData = visible.some(u => {
@@ -278,7 +278,12 @@ function renderSpeedChart() {
 
     const ctx = canvas.getContext('2d');
     const datasets = visible.map(u => {
-        const scoreData = dayIndexes.map(i => hoursToSpeedScore((u.data || [])[i]));
+        // ⭐ تبدیل null به 0 برای اینکه خط تا انتهای نمودار ادامه پیدا کند
+        const scoreData = dayIndexes.map(i => {
+            const v = (u.data || [])[i];
+            const score = hoursToSpeedScore(v);
+            return score === null ? 0 : score;
+        });
         const orig = dayIndexes.map(i => (u.data || [])[i]);
         const grad = ctx.createLinearGradient(0, 0, 0, 300);
         grad.addColorStop(0, hexToRgba(u.color, 0.45));
@@ -688,13 +693,18 @@ function renderAvgTrendChart() {
     g.addColorStop(0.7, 'rgba(234,88,12,0.10)');
     g.addColorStop(1, 'rgba(234,88,12,0.02)');
 
+    // ⭐ نگه‌داشتن داده اصلی برای Tooltip و تبدیل null به 0 برای رسم خط
+    const origData = D.trendAvgHours;
+    const chartData = origData.map(v => (v === null || v === undefined) ? 0 : v);
+
     AnalyticsState.avgTrendChart = new Chart(canvas, {
         type: 'line',
         data: {
             labels: D.trendDays,
             datasets: [{
                 label: 'میانگین زمان (ساعت)',
-                data: D.trendAvgHours,
+                data: chartData,
+                _origHours: origData,
                 borderColor: '#ea580c',
                 backgroundColor: g,
                 borderWidth: 2.5,
@@ -720,8 +730,9 @@ function renderAvgTrendChart() {
                     ...TOOLTIP_STYLE,
                     callbacks: {
                         label: function (ctx) {
-                            if (ctx.parsed.y === null || ctx.parsed.y === undefined) return 'بدون داده';
-                            return 'میانگین زمان: ' + formatDurationJS(ctx.parsed.y);
+                            const orig = (ctx.dataset._origHours || [])[ctx.dataIndex];
+                            if (orig === null || orig === undefined) return 'بدون داده';
+                            return 'میانگین زمان: ' + formatDurationJS(orig);
                         }
                     }
                 }
@@ -888,7 +899,7 @@ function openUserModal(userName) {
         AnalyticsState.modalChart = null;
     }
 
-    // ⭐ فقط روزهای فعال
+    // فقط روزهای فعال
     const totalDays = (D.trendDays || []).length;
     const userData = user.data || [];
     const activeDayIndexes = [];
@@ -899,7 +910,12 @@ function openUserModal(userName) {
     const dayIndexes = activeDayIndexes.length > 0 ? activeDayIndexes : [...Array(totalDays).keys()];
     const activeLabels = dayIndexes.map(i => D.trendDays[i]);
 
-    const scoreData = dayIndexes.map(i => hoursToSpeedScore(userData[i]));
+    // ⭐ تبدیل null به 0
+    const scoreData = dayIndexes.map(i => {
+        const v = userData[i];
+        const score = hoursToSpeedScore(v);
+        return score === null ? 0 : score;
+    });
     const orig = dayIndexes.map(i => userData[i]);
 
     let maxScore = 0;
