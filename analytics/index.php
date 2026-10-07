@@ -554,6 +554,7 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="icon" href="https://img.icons8.com/color/48/dashboard-layout.png" type="image/png">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="style.css">
     <style>
         /* ... (همان style قبلی بدون هیچ تغییر) ... */
     </style>
@@ -1035,8 +1036,10 @@ $projectInitial = mb_substr(trim($project['title']), 0, 1, 'UTF-8');
     </div>
 
     <script>
-        /* ... (همان script قبلی بدون هیچ تغییر) ... */
+        window.ANALYTICS_DATA = <?= $dashboardDataJson ?>;
     </script>
+
+    <script src="app.js"></script>
 </body>
 
 </html>
