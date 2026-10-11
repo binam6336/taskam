@@ -1918,3 +1918,5 @@ The most important invariant is:
 The second most important invariant is:
 
 > **Persian content must remain UTF-8/utf8mb4 throughout the complete request → PHP → PDO → MySQL → JSON/HTML pipeline.**
+
+v 1.0.0 released
