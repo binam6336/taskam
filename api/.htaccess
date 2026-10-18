@@ -1,0 +1,10 @@
+<IfModule mod_setenvif.c>
+    SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+    SetEnvIf X-API-Key "(.*)" HTTP_X_API_KEY=$1
+</IfModule>
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{HTTP:Authorization} ^(.+)$
+    RewriteRule ^(.*)$ - [E=HTTP_AUTHORIZATION:%1]
+</IfModule>
+CGIPassAuth On
